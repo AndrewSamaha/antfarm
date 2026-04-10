@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/antfarm-core",
+    "crates/antfarm-server",
+    "crates/antfarm-tui",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

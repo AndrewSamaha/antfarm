@@ -1,0 +1,13 @@
+[package]
+name = "antfarm-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+antfarm-core = { path = "../antfarm-core" }
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures-util = "0.3"
+ratatui = "0.29"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util"] }
