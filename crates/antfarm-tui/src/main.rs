@@ -15,7 +15,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use std::{env, io, time::Duration};
+use std::{
+    env, io,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -30,12 +33,19 @@ struct App {
     show_help: bool,
     pending_action: Option<PendingAction>,
     last_error: Option<String>,
+    action_animation: Option<ActionAnimation>,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum PendingAction {
     Dig,
     Place,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActionAnimation {
+    dir: MoveDir,
+    until: Instant,
 }
 
 impl App {
@@ -46,6 +56,7 @@ impl App {
             show_help: true,
             pending_action: None,
             last_error: None,
+            action_animation: None,
         }
     }
 
@@ -54,6 +65,15 @@ impl App {
             .players
             .iter()
             .find(|player| player.id == self.player_id)
+    }
+
+    fn tick_animation(&mut self) {
+        if self
+            .action_animation
+            .is_some_and(|animation| Instant::now() >= animation.until)
+        {
+            self.action_animation = None;
+        }
     }
 }
 
@@ -135,7 +155,7 @@ async fn run_app(
         terminal.draw(|frame| draw(frame, &app))?;
 
         tokio::select! {
-            _ = redraw.tick() => {}
+            _ = redraw.tick() => app.tick_animation(),
             maybe_message = network_rx.recv() => {
                 match maybe_message {
                     Some(ServerMessage::Snapshot(snapshot)) => app.snapshot = snapshot,
@@ -190,6 +210,12 @@ async fn handle_event(
             Some(PendingAction::Place) => Action::Place(dir),
             None => default_action(app, dir),
         };
+        if matches!(action, Action::Dig(_) | Action::Place(_)) {
+            app.action_animation = Some(ActionAnimation {
+                dir,
+                until: Instant::now() + Duration::from_millis(110),
+            });
+        }
         send_action(writer, action).await?;
         return Ok(false);
     }
@@ -334,8 +360,13 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         } else {
             Color::Cyan
         };
+        let glyph = if player.id == app.player_id {
+            animated_player_glyph(app)
+        } else {
+            "@@"
+        };
         return Span::styled(
-            "@@",
+            glyph,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         );
     }
@@ -358,6 +389,16 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         Tile::Dirt => Span::styled("▓▓", Style::default().fg(Color::Gray)),
         Tile::Stone => Span::styled("██", Style::default().fg(Color::White)),
         Tile::Resource => Span::styled("▒▒", Style::default().fg(Color::LightCyan)),
+    }
+}
+
+fn animated_player_glyph(app: &App) -> &'static str {
+    match app.action_animation.map(|animation| animation.dir) {
+        Some(MoveDir::Left) => "@ ",
+        Some(MoveDir::Right) => " @",
+        Some(MoveDir::Up) => "/\\",
+        Some(MoveDir::Down) => "\\/",
+        None => "@@",
     }
 }
 
