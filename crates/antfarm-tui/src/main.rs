@@ -35,6 +35,7 @@ struct App {
     player_id: u8,
     snapshot: Snapshot,
     show_help: bool,
+    show_params: bool,
     show_events: bool,
     pending_command: PendingCommand,
     command_input: Option<String>,
@@ -64,6 +65,7 @@ impl App {
             player_id,
             snapshot,
             show_help: true,
+            show_params: false,
             show_events: false,
             pending_command: PendingCommand::None,
             command_input: None,
@@ -95,6 +97,7 @@ impl App {
         self.pending_command = PendingCommand::None;
         self.command_input = None;
         self.command_feedback = None;
+        self.show_params = false;
         self.action_animation = None;
         self.last_error = Some(message);
     }
@@ -307,6 +310,7 @@ async fn handle_event(
             app.pending_command = PendingCommand::None;
             app.command_input = None;
             app.command_feedback = None;
+            app.show_params = false;
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('e') => app.show_events = !app.show_events,
@@ -413,6 +417,12 @@ async fn submit_command(
         return Ok(());
     }
 
+    if trimmed == "/sc show_params" {
+        app.show_params = true;
+        app.last_error = None;
+        return Ok(());
+    }
+
     if head == "/sc" && verb == "world_reset" {
         send_message(writer, ClientMessage::WorldReset).await?;
         app.last_error = None;
@@ -420,7 +430,7 @@ async fn submit_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.last_error = Some("expected: /help, /sc world_reset, or /sc set <path> <value>".to_string());
+        app.last_error = Some("expected: /help, /sc show_params, /sc world_reset, or /sc set <path> <value>".to_string());
         return Ok(());
     }
 
@@ -462,6 +472,7 @@ fn command_suggestion(input: &str) -> Option<String> {
 
     let suggestions = [
         "/help",
+        "/sc show_params",
         "/sc world_reset",
         "/sc set soil.settle_frequency 0.01",
         "/sc set world.snapshot_interval 5.0",
@@ -483,6 +494,7 @@ fn autocomplete_command(input: &mut String) {
     let trimmed = input.trim_start();
     let suggestions = [
         "/help",
+        "/sc show_params",
         "/sc world_reset",
         "/sc set soil.settle_frequency 0.01",
         "/sc set world.snapshot_interval 5.0",
@@ -540,6 +552,10 @@ fn draw(frame: &mut Frame, app: &App) {
 
     if app.reconnecting {
         draw_reconnect_modal(frame, centered_rect(46, 26, area), app);
+    }
+
+    if app.show_params {
+        draw_params_modal(frame, centered_rect(62, 62, area), app);
     }
 
     if app.show_help {
@@ -742,6 +758,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Space d h/j/k/l: place dirt"),
         Line::from("Space s h/j/k/l: place stone"),
         Line::from("/help"),
+        Line::from("/sc show_params"),
         Line::from("/sc set soil.settle_frequency 0.01"),
         Line::from("/sc set world.snapshot_interval 5.0"),
         Line::from("/sc world_reset"),
@@ -779,6 +796,20 @@ fn draw_reconnect_modal(frame: &mut Frame, area: Rect, app: &App) {
     let modal = Paragraph::new(lines)
         .block(Block::default().title("Reconnecting").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
+    frame.render_widget(modal, area);
+}
+
+fn draw_params_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let pretty = serde_json::to_string_pretty(&app.snapshot.config)
+        .unwrap_or_else(|_| "{\"error\":\"failed to render config\"}".to_string());
+    let mut lines: Vec<Line> = pretty.lines().map(Line::from).collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from("Esc: close"));
+
+    frame.render_widget(Clear, area);
+    let modal = Paragraph::new(lines)
+        .block(Block::default().title("Server Params").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
     frame.render_widget(modal, area);
 }
 

@@ -166,6 +166,10 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     continue;
                 }
 
+                {
+                    let game = state.game.lock().await;
+                    let _ = state.persistence_tx.send(PersistMessage::Save(game.snapshot()));
+                }
                 broadcast_snapshot(&state).await?;
             }
             ClientMessage::WorldReset => {
