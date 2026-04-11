@@ -38,6 +38,7 @@ struct App {
     show_events: bool,
     pending_command: PendingCommand,
     command_input: Option<String>,
+    command_feedback: Option<String>,
     last_error: Option<String>,
     action_animation: Option<ActionAnimation>,
     reconnecting: bool,
@@ -66,6 +67,7 @@ impl App {
             show_events: false,
             pending_command: PendingCommand::None,
             command_input: None,
+            command_feedback: None,
             last_error: None,
             action_animation: None,
             reconnecting: false,
@@ -92,6 +94,7 @@ impl App {
         self.reconnecting = true;
         self.pending_command = PendingCommand::None;
         self.command_input = None;
+        self.command_feedback = None;
         self.action_animation = None;
         self.last_error = Some(message);
     }
@@ -303,15 +306,17 @@ async fn handle_event(
         KeyCode::Esc => {
             app.pending_command = PendingCommand::None;
             app.command_input = None;
+            app.command_feedback = None;
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('e') => app.show_events = !app.show_events,
         KeyCode::Char('/') => {
             app.command_input = Some("/".to_string());
+            app.command_feedback = command_suggestion("/");
             app.pending_command = PendingCommand::None;
             app.last_error = None;
         }
-        KeyCode::Char('p') => app.pending_command = PendingCommand::PlaceMaterial,
+        KeyCode::Char(' ') => app.pending_command = PendingCommand::PlaceMaterial,
         KeyCode::Char('d') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
             app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Dirt);
             app.last_error = None;
@@ -353,20 +358,33 @@ async fn handle_command_input(
     };
 
     match code {
-        KeyCode::Esc => app.command_input = None,
+        KeyCode::Esc => {
+            app.command_input = None;
+            app.command_feedback = None;
+        }
         KeyCode::Backspace => {
             input.pop();
             if input.is_empty() {
                 app.command_input = None;
+                app.command_feedback = None;
             }
         }
         KeyCode::Enter => {
             let command = input.clone();
             app.command_input = None;
+            app.command_feedback = None;
             submit_command(command, app, writer).await?;
+        }
+        KeyCode::Tab => {
+            autocomplete_command(input);
+            app.command_feedback = command_suggestion(input);
         }
         KeyCode::Char(ch) => input.push(ch),
         _ => {}
+    }
+
+    if let Some(input) = &app.command_input {
+        app.command_feedback = command_suggestion(input);
     }
 
     Ok(false)
@@ -389,6 +407,12 @@ async fn submit_command(
         return Ok(());
     };
 
+    if trimmed == "/help" {
+        app.show_help = true;
+        app.last_error = None;
+        return Ok(());
+    }
+
     if head == "/sc" && verb == "world_reset" {
         send_message(writer, ClientMessage::WorldReset).await?;
         app.last_error = None;
@@ -396,7 +420,7 @@ async fn submit_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.last_error = Some("expected: /sc set <path> <value> or /sc world_reset".to_string());
+        app.last_error = Some("expected: /help, /sc world_reset, or /sc set <path> <value>".to_string());
         return Ok(());
     }
 
@@ -427,6 +451,50 @@ fn parse_config_value(raw: &str) -> Result<Value> {
         "false" => Ok(Value::from(false)),
         "null" => Ok(Value::Null),
         _ => Ok(Value::from(raw)),
+    }
+}
+
+fn command_suggestion(input: &str) -> Option<String> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    let suggestions = [
+        "/help",
+        "/sc world_reset",
+        "/sc set soil.settle_frequency 0.01",
+        "/sc set world.snapshot_interval 5.0",
+    ];
+
+    let matches: Vec<_> = suggestions
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(trimmed))
+        .collect();
+
+    if matches.is_empty() {
+        None
+    } else {
+        Some(matches.join("   "))
+    }
+}
+
+fn autocomplete_command(input: &mut String) {
+    let trimmed = input.trim_start();
+    let suggestions = [
+        "/help",
+        "/sc world_reset",
+        "/sc set soil.settle_frequency 0.01",
+        "/sc set world.snapshot_interval 5.0",
+    ];
+
+    let matches: Vec<_> = suggestions
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(trimmed))
+        .collect();
+
+    if matches.len() == 1 {
+        *input = matches[0].to_string();
     }
 }
 
@@ -523,10 +591,23 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     ));
 
     let command_line = if let Some(input) = &app.command_input {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("cmd ", Style::default().fg(Color::LightGreen)),
             Span::raw(input.clone()),
-        ])
+        ];
+        if let Some(feedback) = &app.command_feedback {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                feedback.clone(),
+                Style::default().fg(Color::LightBlue),
+            ));
+        }
+        Line::from(spans)
+    } else if let Some(feedback) = &app.command_feedback {
+        Line::from(vec![Span::styled(
+            feedback.clone(),
+            Style::default().fg(Color::LightBlue),
+        )])
     } else if let Some(error) = &app.last_error {
         Line::from(vec![Span::styled(
             format!("error {error}"),
@@ -658,10 +739,13 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
 
     let lines = vec![
         Line::from("hjkl: move or auto-dig"),
-        Line::from("p d h/j/k/l: place dirt"),
-        Line::from("p s h/j/k/l: place stone"),
+        Line::from("Space d h/j/k/l: place dirt"),
+        Line::from("Space s h/j/k/l: place stone"),
+        Line::from("/help"),
         Line::from("/sc set soil.settle_frequency 0.01"),
+        Line::from("/sc set world.snapshot_interval 5.0"),
         Line::from("/sc world_reset"),
+        Line::from("Tab: autocomplete slash command"),
         Line::from("e: toggle event pane"),
         Line::from("? : toggle help"),
         Line::from("Esc: cancel place command or slash command"),
