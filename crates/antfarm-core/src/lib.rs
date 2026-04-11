@@ -10,6 +10,7 @@ pub const SURFACE_Y: i32 = 18;
 pub const TICK_MILLIS: u64 = 120;
 pub const STONE_DIG_STEPS: u8 = 10;
 pub const DEFAULT_SOIL_SETTLE_FREQUENCY: f64 = 0.01;
+pub const DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS: f64 = 5.0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Position {
@@ -183,6 +184,7 @@ pub enum ClientMessage {
     Join { name: String },
     Action(Action),
     ConfigSet { path: String, value: Value },
+    WorldReset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +257,21 @@ impl GameState {
         }
     }
 
+    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        let seed = 7;
+        Self {
+            tick: snapshot.tick,
+            world: snapshot.world,
+            players: HashMap::new(),
+            npcs: snapshot.npcs,
+            event_log: vec!["Server restored world snapshot".to_string()],
+            config: merge_with_default_config(snapshot.config),
+            dig_progress: HashMap::new(),
+            rng: StdRng::seed_from_u64(seed + 1),
+            next_player_id: 1,
+        }
+    }
+
     pub fn add_player(&mut self, name: String) -> Result<(u8, Snapshot), String> {
         if self.players.len() >= MAX_PLAYERS {
             return Err(format!("Room full: max {} players", MAX_PLAYERS));
@@ -321,6 +338,50 @@ impl GameState {
         set_config_path(&mut self.config, path, value)?;
         self.push_event(format!("Config updated: {path}"));
         Ok(())
+    }
+
+    pub fn world_reset(&mut self) {
+        let existing_players: Vec<(u8, String)> = self
+            .players
+            .iter()
+            .map(|(id, player)| (*id, player.name.clone()))
+            .collect();
+        let next_player_id = self.next_player_id;
+        *self = Self::new();
+        self.next_player_id = next_player_id;
+        for (index, (id, name)) in existing_players.into_iter().enumerate() {
+            let spawn_x = 8 + (index as i32 * 6);
+            self.players.insert(
+                id,
+                Player {
+                    id,
+                    name,
+                    pos: Position {
+                        x: spawn_x.min(self.world.width() - 2),
+                        y: SURFACE_Y - 1,
+                    },
+                    facing: Facing::Right,
+                    inventory: HashMap::from([
+                        ("dirt".to_string(), 8),
+                        ("ore".to_string(), 0),
+                        ("stone".to_string(), 0),
+                    ]),
+                },
+            );
+        }
+        self.push_event("World reset by server command".to_string());
+        if !self.players.is_empty() {
+            self.push_event(format!("Respawned {} connected ants", self.players.len()));
+        }
+    }
+
+    pub fn snapshot_interval_seconds(&self) -> f64 {
+        config_f64(
+            &self.config,
+            "world.snapshot_interval",
+            DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS,
+        )
+        .max(0.5)
     }
 
     pub fn tick(&mut self) {
@@ -604,8 +665,17 @@ fn default_config() -> Value {
     json!({
         "soil": {
             "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY
+        },
+        "world": {
+            "snapshot_interval": DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS
         }
     })
+}
+
+fn merge_with_default_config(config: Value) -> Value {
+    let mut merged = default_config();
+    merge_config_value(&mut merged, config);
+    merged
 }
 
 fn inventory_count(inventory: &HashMap<String, u16>, key: &str) -> u16 {
@@ -671,6 +741,24 @@ fn config_f64(root: &Value, path: &str, default: f64) -> f64 {
         current = next;
     }
     current.as_f64().unwrap_or(default)
+}
+
+fn merge_config_value(target: &mut Value, incoming: Value) {
+    match (target, incoming) {
+        (Value::Object(target_map), Value::Object(incoming_map)) => {
+            for (key, value) in incoming_map {
+                match target_map.get_mut(&key) {
+                    Some(existing) => merge_config_value(existing, value),
+                    None => {
+                        target_map.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, incoming) => {
+            *target = incoming;
+        }
+    }
 }
 
 fn nearest_target(origin: Position, positions: &[Position]) -> Option<Position> {

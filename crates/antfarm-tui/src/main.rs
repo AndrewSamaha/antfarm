@@ -384,16 +384,23 @@ async fn submit_command(
     let path = parts.next().unwrap_or_default();
     let raw_value = parts.next().unwrap_or_default();
 
-    if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.last_error = Some("expected: /sc set <path> <value>".to_string());
-        return Ok(());
-    }
-
-    let value = parse_config_value(raw_value)?;
     let Some(writer) = writer else {
         app.last_error = Some("server unavailable while reconnecting".to_string());
         return Ok(());
     };
+
+    if head == "/sc" && verb == "world_reset" {
+        send_message(writer, ClientMessage::WorldReset).await?;
+        app.last_error = None;
+        return Ok(());
+    }
+
+    if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
+        app.last_error = Some("expected: /sc set <path> <value> or /sc world_reset".to_string());
+        return Ok(());
+    }
+
+    let value = parse_config_value(raw_value)?;
     send_message(
         writer,
         ClientMessage::ConfigSet {
@@ -654,6 +661,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("p d h/j/k/l: place dirt"),
         Line::from("p s h/j/k/l: place stone"),
         Line::from("/sc set soil.settle_frequency 0.01"),
+        Line::from("/sc world_reset"),
         Line::from("e: toggle event pane"),
         Line::from("? : toggle help"),
         Line::from("Esc: cancel place command or slash command"),
