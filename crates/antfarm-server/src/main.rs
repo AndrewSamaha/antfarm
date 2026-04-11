@@ -112,6 +112,26 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                 }
                 broadcast_snapshot(&state).await?;
             }
+            ClientMessage::ConfigSet { path, value } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before changing config".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let result = {
+                    let mut game = state.game.lock().await;
+                    game.set_config_value(&path, value)
+                };
+
+                if let Err(message) = result {
+                    tx.send(ServerMessage::Error { message })?;
+                    continue;
+                }
+
+                broadcast_snapshot(&state).await?;
+            }
         }
     }
 

@@ -16,7 +16,9 @@ Cross-platform terminal ant colony game prototype in Rust.
 - player movement above ground and underground
 - digging dirt and resources
 - placing dirt back into the world
+- placing stone back into the world
 - stone obstacles
+- config-driven soil settling
 - NPC ants that tunnel toward players and disturb them
 - modal help overlay
 
@@ -34,4 +36,4 @@ In one or more additional terminals:
 cargo run -p antfarm-tui -- scout
 ```
 
-Use arrow keys or `h j k l` to move. Press `d` then a direction to dig, `p` then a direction to place dirt, `?` to toggle the help modal, and `q` to quit.
+Use `h j k l` to move; filled tiles auto-dig. Use `p d h/j/k/l` to place dirt and `p s h/j/k/l` to place stone. Press `/` to enter a slash command like `/sc set soil.settle_frequency 0.01`, `?` to toggle the help modal, and `q` to quit.

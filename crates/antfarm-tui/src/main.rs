@@ -15,6 +15,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use serde_json::Value;
 use std::{
     env, io,
     time::{Duration, Instant},
@@ -32,6 +33,7 @@ struct App {
     snapshot: Snapshot,
     show_help: bool,
     pending_command: PendingCommand,
+    command_input: Option<String>,
     last_error: Option<String>,
     action_animation: Option<ActionAnimation>,
 }
@@ -56,6 +58,7 @@ impl App {
             snapshot,
             show_help: true,
             pending_command: PendingCommand::None,
+            command_input: None,
             last_error: None,
             action_animation: None,
         }
@@ -197,6 +200,10 @@ async fn handle_event(
         return Ok(false);
     }
 
+    if app.command_input.is_some() {
+        return handle_command_input(key.code, app, writer).await;
+    }
+
     let direction = match key.code {
         KeyCode::Char('k') => Some(MoveDir::Up),
         KeyCode::Char('j') => Some(MoveDir::Down),
@@ -229,8 +236,16 @@ async fn handle_event(
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => app.pending_command = PendingCommand::None,
+        KeyCode::Esc => {
+            app.pending_command = PendingCommand::None;
+            app.command_input = None;
+        }
         KeyCode::Char('?') => app.show_help = !app.show_help,
+        KeyCode::Char('/') => {
+            app.command_input = Some("/".to_string());
+            app.pending_command = PendingCommand::None;
+            app.last_error = None;
+        }
         KeyCode::Char('p') => app.pending_command = PendingCommand::PlaceMaterial,
         KeyCode::Char('d') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
             app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Dirt);
@@ -251,6 +266,92 @@ async fn send_action(writer: &mut tokio::net::tcp::OwnedWriteHalf, action: Actio
     writer.write_all(payload.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
+}
+
+async fn send_message(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    message: ClientMessage,
+) -> Result<()> {
+    let payload = serde_json::to_string(&message)?;
+    writer.write_all(payload.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    Ok(())
+}
+
+async fn handle_command_input(
+    code: KeyCode,
+    app: &mut App,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+) -> Result<bool> {
+    let Some(input) = app.command_input.as_mut() else {
+        return Ok(false);
+    };
+
+    match code {
+        KeyCode::Esc => app.command_input = None,
+        KeyCode::Backspace => {
+            input.pop();
+            if input.is_empty() {
+                app.command_input = None;
+            }
+        }
+        KeyCode::Enter => {
+            let command = input.clone();
+            app.command_input = None;
+            submit_command(command, app, writer).await?;
+        }
+        KeyCode::Char(ch) => input.push(ch),
+        _ => {}
+    }
+
+    Ok(false)
+}
+
+async fn submit_command(
+    command: String,
+    app: &mut App,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+) -> Result<()> {
+    let trimmed = command.trim();
+    let mut parts = trimmed.splitn(4, ' ');
+    let head = parts.next().unwrap_or_default();
+    let verb = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    let raw_value = parts.next().unwrap_or_default();
+
+    if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
+        app.last_error = Some("expected: /sc set <path> <value>".to_string());
+        return Ok(());
+    }
+
+    let value = parse_config_value(raw_value)?;
+    send_message(
+        writer,
+        ClientMessage::ConfigSet {
+            path: path.to_string(),
+            value,
+        },
+    )
+    .await?;
+    app.last_error = None;
+    Ok(())
+}
+
+fn parse_config_value(raw: &str) -> Result<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return Ok(value);
+    }
+
+    if let Ok(number) = raw.parse::<f64>() {
+        return Ok(Value::from(number));
+    }
+
+    match raw {
+        "true" => Ok(Value::from(true)),
+        "false" => Ok(Value::from(false)),
+        "null" => Ok(Value::Null),
+        _ => Ok(Value::from(raw)),
+    }
 }
 
 fn default_action(app: &App, dir: MoveDir) -> Action {
@@ -276,7 +377,7 @@ fn draw(frame: &mut Frame, app: &App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(8),
             Constraint::Length(7),
         ])
@@ -292,7 +393,7 @@ fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    let mut spans = vec![Span::styled(
+    let mut top = vec![Span::styled(
         "Antfarm vertical slice",
         Style::default()
             .fg(Color::Yellow)
@@ -303,7 +404,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let dirt = player.inventory.get("dirt").copied().unwrap_or(0);
         let ore = player.inventory.get("ore").copied().unwrap_or(0);
         let stone = player.inventory.get("stone").copied().unwrap_or(0);
-        spans.push(Span::raw(format!(
+        top.push(Span::raw(format!(
             "  ant={} dirt={} ore={} stone={} pos=({}, {})",
             player.id, dirt, ore, stone, player.pos.x, player.pos.y
         )));
@@ -316,20 +417,40 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         PendingCommand::PlaceDirection(PlaceMaterial::Stone) => Some("PLACE stone"),
     };
     if let Some(label) = mode {
-        spans.push(Span::styled(
+        top.push(Span::styled(
             format!("  mode={label}"),
             Style::default().fg(Color::LightCyan),
         ));
     }
 
-    if let Some(error) = &app.last_error {
-        spans.push(Span::styled(
-            format!("  error={error}"),
-            Style::default().fg(Color::Red),
-        ));
-    }
+    let settle = app
+        .snapshot
+        .config
+        .get("soil")
+        .and_then(|soil| soil.get("settle_frequency"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    top.push(Span::styled(
+        format!("  settle={settle:.3}"),
+        Style::default().fg(Color::LightYellow),
+    ));
 
-    let paragraph = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::ALL));
+    let command_line = if let Some(input) = &app.command_input {
+        Line::from(vec![
+            Span::styled("cmd ", Style::default().fg(Color::LightGreen)),
+            Span::raw(input.clone()),
+        ])
+    } else if let Some(error) = &app.last_error {
+        Line::from(vec![Span::styled(
+            format!("error {error}"),
+            Style::default().fg(Color::Red),
+        )])
+    } else {
+        Line::from("type / for server config commands")
+    };
+
+    let paragraph = Paragraph::new(vec![Line::from(top), command_line])
+        .block(Block::default().borders(Borders::ALL));
     frame.render_widget(paragraph, area);
 }
 
@@ -452,8 +573,9 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("hjkl: move or auto-dig"),
         Line::from("p d h/j/k/l: place dirt"),
         Line::from("p s h/j/k/l: place stone"),
+        Line::from("/sc set soil.settle_frequency 0.01"),
         Line::from("? : toggle help"),
-        Line::from("Esc: cancel place command"),
+        Line::from("Esc: cancel place command or slash command"),
         Line::from("q: quit"),
         Line::from(""),
         Line::from(mode_line),

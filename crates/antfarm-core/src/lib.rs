@@ -1,5 +1,6 @@
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
 pub const MAX_PLAYERS: usize = 5;
@@ -8,6 +9,7 @@ pub const WORLD_HEIGHT: i32 = 80;
 pub const SURFACE_Y: i32 = 18;
 pub const TICK_MILLIS: u64 = 120;
 pub const STONE_DIG_STEPS: u8 = 10;
+pub const DEFAULT_SOIL_SETTLE_FREQUENCY: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Position {
@@ -159,6 +161,7 @@ pub struct Snapshot {
     pub players: Vec<Player>,
     pub npcs: Vec<NpcAnt>,
     pub event_log: Vec<String>,
+    pub config: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,6 +182,7 @@ pub struct JoinAck {
 pub enum ClientMessage {
     Join { name: String },
     Action(Action),
+    ConfigSet { path: String, value: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,13 +215,16 @@ pub struct GameState {
     pub players: HashMap<u8, Player>,
     pub npcs: Vec<NpcAnt>,
     pub event_log: Vec<String>,
+    pub config: Value,
     dig_progress: HashMap<u8, DigProgress>,
+    rng: StdRng,
     next_player_id: u8,
 }
 
 impl GameState {
     pub fn new() -> Self {
-        let world = World::new(7, WORLD_WIDTH, WORLD_HEIGHT);
+        let seed = 7;
+        let world = World::new(seed, WORLD_WIDTH, WORLD_HEIGHT);
         let npcs = vec![
             NpcAnt {
                 id: 1,
@@ -241,7 +248,9 @@ impl GameState {
             players: HashMap::new(),
             npcs,
             event_log: vec!["Server booted ant colony".to_string()],
+            config: default_config(),
             dig_progress: HashMap::new(),
+            rng: StdRng::seed_from_u64(seed + 1),
             next_player_id: 1,
         }
     }
@@ -292,6 +301,7 @@ impl GameState {
             players,
             npcs: self.npcs.clone(),
             event_log: self.event_log.clone(),
+            config: self.config.clone(),
         }
     }
 
@@ -303,8 +313,19 @@ impl GameState {
         }
     }
 
+    pub fn set_config_value(&mut self, path: &str, value: Value) -> Result<(), String> {
+        if path.trim().is_empty() {
+            return Err("config path cannot be empty".to_string());
+        }
+
+        set_config_path(&mut self.config, path, value)?;
+        self.push_event(format!("Config updated: {path}"));
+        Ok(())
+    }
+
     pub fn tick(&mut self) {
         self.tick += 1;
+        self.tick_soil_settling();
 
         let player_positions: Vec<_> = self.players.values().map(|player| player.pos).collect();
         let mut events = Vec::new();
@@ -505,6 +526,86 @@ impl GameState {
             self.event_log.drain(0..extra);
         }
     }
+
+    fn tick_soil_settling(&mut self) {
+        let frequency = config_f64(
+            &self.config,
+            "soil.settle_frequency",
+            DEFAULT_SOIL_SETTLE_FREQUENCY,
+        )
+        .clamp(0.0, 1.0);
+
+        if frequency <= 0.0 {
+            return;
+        }
+
+        let occupied: Vec<_> = self
+            .players
+            .values()
+            .map(|player| player.pos)
+            .chain(self.npcs.iter().map(|npc| npc.pos))
+            .collect();
+
+        for y in (0..self.world.height()).rev() {
+            for x in 0..self.world.width() {
+                let pos = Position { x, y };
+                if self.world.tile(pos) != Some(Tile::Dirt) || occupied.contains(&pos) {
+                    continue;
+                }
+                if self.rng.random::<f64>() > frequency {
+                    continue;
+                }
+
+                let below = pos.offset(0, 1);
+                let down_right = pos.offset(1, 1);
+                let right = pos.offset(1, 0);
+                let down_left = pos.offset(-1, 1);
+                let left = pos.offset(-1, 0);
+
+                let target = if self.world.in_bounds(below) && self.world.tile(below) == Some(Tile::Empty)
+                {
+                    if !occupied.contains(&below) {
+                        Some(below)
+                    } else {
+                        None
+                    }
+                } else if self.world.in_bounds(right)
+                    && self.world.in_bounds(down_right)
+                    && self.world.tile(right) == Some(Tile::Empty)
+                    && self.world.tile(down_right) == Some(Tile::Empty)
+                    && !occupied.contains(&right)
+                    && !occupied.contains(&down_right)
+                {
+                    Some(down_right)
+                } else if self.world.in_bounds(left)
+                    && self.world.in_bounds(down_left)
+                    && self.world.tile(left) == Some(Tile::Empty)
+                    && self.world.tile(down_left) == Some(Tile::Empty)
+                    && !occupied.contains(&left)
+                    && !occupied.contains(&down_left)
+                {
+                    Some(down_left)
+                } else {
+                    None
+                };
+
+                let Some(target) = target else {
+                    continue;
+                };
+
+                self.world.set_tile(pos, Tile::Empty);
+                self.world.set_tile(target, Tile::Dirt);
+            }
+        }
+    }
+}
+
+fn default_config() -> Value {
+    json!({
+        "soil": {
+            "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY
+        }
+    })
 }
 
 fn inventory_count(inventory: &HashMap<String, u16>, key: &str) -> u16 {
@@ -525,6 +626,51 @@ fn remove_inventory(inventory: &mut HashMap<String, u16>, key: &str, amount: u16
     }
     *entry -= amount;
     true
+}
+
+fn set_config_path(root: &mut Value, path: &str, value: Value) -> Result<(), String> {
+    let segments: Vec<_> = path
+        .split('.')
+        .filter(|segment| !segment.trim().is_empty())
+        .collect();
+    if segments.is_empty() {
+        return Err("config path cannot be empty".to_string());
+    }
+
+    if !root.is_object() {
+        *root = Value::Object(Map::new());
+    }
+
+    let mut current = root;
+    for segment in &segments[..segments.len() - 1] {
+        let Some(object) = current.as_object_mut() else {
+            return Err(format!("path segment {segment} is not an object"));
+        };
+        current = object
+            .entry((*segment).to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !current.is_object() {
+            *current = Value::Object(Map::new());
+        }
+    }
+
+    let final_key = segments.last().expect("non-empty segments");
+    let Some(object) = current.as_object_mut() else {
+        return Err(format!("parent of {final_key} is not an object"));
+    };
+    object.insert((*final_key).to_string(), value);
+    Ok(())
+}
+
+fn config_f64(root: &Value, path: &str, default: f64) -> f64 {
+    let mut current = root;
+    for segment in path.split('.').filter(|segment| !segment.trim().is_empty()) {
+        let Some(next) = current.get(segment) else {
+            return default;
+        };
+        current = next;
+    }
+    current.as_f64().unwrap_or(default)
 }
 
 fn nearest_target(origin: Position, positions: &[Position]) -> Option<Position> {
