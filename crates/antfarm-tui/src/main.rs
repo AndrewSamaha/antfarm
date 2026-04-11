@@ -1,6 +1,6 @@
 use antfarm_core::{
-    Action, ClientMessage, MoveDir, Player, Position, SURFACE_Y, ServerMessage, Snapshot, Tile,
-    Viewport,
+    Action, ClientMessage, MoveDir, PlaceMaterial, Player, Position, SURFACE_Y, ServerMessage,
+    Snapshot, Tile, Viewport,
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -31,15 +31,16 @@ struct App {
     player_id: u8,
     snapshot: Snapshot,
     show_help: bool,
-    pending_action: Option<PendingAction>,
+    pending_command: PendingCommand,
     last_error: Option<String>,
     action_animation: Option<ActionAnimation>,
 }
 
 #[derive(Debug, Clone, Copy)]
-enum PendingAction {
-    Dig,
-    Place,
+enum PendingCommand {
+    None,
+    PlaceMaterial,
+    PlaceDirection(PlaceMaterial),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +55,7 @@ impl App {
             player_id,
             snapshot,
             show_help: true,
-            pending_action: None,
+            pending_command: PendingCommand::None,
             last_error: None,
             action_animation: None,
         }
@@ -197,20 +198,26 @@ async fn handle_event(
     }
 
     let direction = match key.code {
-        KeyCode::Up | KeyCode::Char('k') => Some(MoveDir::Up),
-        KeyCode::Down | KeyCode::Char('j') => Some(MoveDir::Down),
-        KeyCode::Left | KeyCode::Char('h') => Some(MoveDir::Left),
-        KeyCode::Right | KeyCode::Char('l') => Some(MoveDir::Right),
+        KeyCode::Char('k') => Some(MoveDir::Up),
+        KeyCode::Char('j') => Some(MoveDir::Down),
+        KeyCode::Char('h') => Some(MoveDir::Left),
+        KeyCode::Char('l') => Some(MoveDir::Right),
         _ => None,
     };
 
     if let Some(dir) = direction {
-        let action = match app.pending_action.take() {
-            Some(PendingAction::Dig) => Action::Dig(dir),
-            Some(PendingAction::Place) => Action::Place(dir),
-            None => default_action(app, dir),
+        let action = match app.pending_command {
+            PendingCommand::None => default_action(app, dir),
+            PendingCommand::PlaceMaterial => {
+                app.last_error = Some("Choose a material first: d for dirt or s for stone".to_string());
+                return Ok(false);
+            }
+            PendingCommand::PlaceDirection(material) => {
+                app.pending_command = PendingCommand::None;
+                Action::Place { dir, material }
+            }
         };
-        if matches!(action, Action::Dig(_) | Action::Place(_)) {
+        if matches!(action, Action::Dig(_) | Action::Place { .. }) {
             app.action_animation = Some(ActionAnimation {
                 dir,
                 until: Instant::now() + Duration::from_millis(110),
@@ -222,10 +229,17 @@ async fn handle_event(
 
     match key.code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => app.pending_action = None,
+        KeyCode::Esc => app.pending_command = PendingCommand::None,
         KeyCode::Char('?') => app.show_help = !app.show_help,
-        KeyCode::Char('d') => app.pending_action = Some(PendingAction::Dig),
-        KeyCode::Char('p') => app.pending_action = Some(PendingAction::Place),
+        KeyCode::Char('p') => app.pending_command = PendingCommand::PlaceMaterial,
+        KeyCode::Char('d') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
+            app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Dirt);
+            app.last_error = None;
+        }
+        KeyCode::Char('s') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
+            app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Stone);
+            app.last_error = None;
+        }
         _ => {}
     }
 
@@ -286,17 +300,22 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     )];
 
     if let Some(player) = app.player() {
+        let dirt = player.inventory.get("dirt").copied().unwrap_or(0);
+        let ore = player.inventory.get("ore").copied().unwrap_or(0);
+        let stone = player.inventory.get("stone").copied().unwrap_or(0);
         spans.push(Span::raw(format!(
-            "  ant={} dirt={} ore={} pos=({}, {})",
-            player.id, player.dirt, player.resources, player.pos.x, player.pos.y
+            "  ant={} dirt={} ore={} stone={} pos=({}, {})",
+            player.id, dirt, ore, stone, player.pos.x, player.pos.y
         )));
     }
 
-    if let Some(mode) = app.pending_action {
-        let label = match mode {
-            PendingAction::Dig => "DIG",
-            PendingAction::Place => "PLACE",
-        };
+    let mode = match app.pending_command {
+        PendingCommand::None => None,
+        PendingCommand::PlaceMaterial => Some("PLACE material"),
+        PendingCommand::PlaceDirection(PlaceMaterial::Dirt) => Some("PLACE dirt"),
+        PendingCommand::PlaceDirection(PlaceMaterial::Stone) => Some("PLACE stone"),
+    };
+    if let Some(label) = mode {
         spans.push(Span::styled(
             format!("  mode={label}"),
             Style::default().fg(Color::LightCyan),
@@ -418,18 +437,23 @@ fn draw_log(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
-    let mode_line = match app.pending_action {
-        Some(PendingAction::Dig) => "Pending dig: press a direction.",
-        Some(PendingAction::Place) => "Pending place: press a direction.",
-        None => "Move with arrows or hjkl.",
+    let mode_line = match app.pending_command {
+        PendingCommand::None => "Move with hjkl. Filled tiles auto-dig.",
+        PendingCommand::PlaceMaterial => "Pending place: choose d for dirt or s for stone.",
+        PendingCommand::PlaceDirection(PlaceMaterial::Dirt) => {
+            "Pending place dirt: press h, j, k, or l."
+        }
+        PendingCommand::PlaceDirection(PlaceMaterial::Stone) => {
+            "Pending place stone: press h, j, k, or l."
+        }
     };
 
     let lines = vec![
-        Line::from("Arrows / hjkl: move or auto-dig"),
-        Line::from("d then direction: force a dig action"),
-        Line::from("p then direction: place dirt"),
+        Line::from("hjkl: move or auto-dig"),
+        Line::from("p d h/j/k/l: place dirt"),
+        Line::from("p s h/j/k/l: place stone"),
         Line::from("? : toggle help"),
-        Line::from("Esc: cancel dig/place"),
+        Line::from("Esc: cancel place command"),
         Line::from("q: quit"),
         Line::from(""),
         Line::from(mode_line),

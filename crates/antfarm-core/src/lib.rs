@@ -7,6 +7,7 @@ pub const WORLD_WIDTH: i32 = 160;
 pub const WORLD_HEIGHT: i32 = 80;
 pub const SURFACE_Y: i32 = 18;
 pub const TICK_MILLIS: u64 = 120;
+pub const STONE_DIG_STEPS: u8 = 10;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Position {
@@ -73,8 +74,7 @@ pub struct Player {
     pub name: String,
     pub pos: Position,
     pub facing: Facing,
-    pub dirt: u16,
-    pub resources: u16,
+    pub inventory: HashMap<String, u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +161,14 @@ pub struct Snapshot {
     pub event_log: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DigProgress {
+    pub target: Position,
+    pub tile: Tile,
+    pub steps: u8,
+    pub last_tick: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinAck {
     pub player_id: u8,
@@ -184,7 +192,16 @@ pub enum ServerMessage {
 pub enum Action {
     Move(MoveDir),
     Dig(MoveDir),
-    Place(MoveDir),
+    Place {
+        dir: MoveDir,
+        material: PlaceMaterial,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PlaceMaterial {
+    Dirt,
+    Stone,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +211,7 @@ pub struct GameState {
     pub players: HashMap<u8, Player>,
     pub npcs: Vec<NpcAnt>,
     pub event_log: Vec<String>,
+    dig_progress: HashMap<u8, DigProgress>,
     next_player_id: u8,
 }
 
@@ -223,6 +241,7 @@ impl GameState {
             players: HashMap::new(),
             npcs,
             event_log: vec!["Server booted ant colony".to_string()],
+            dig_progress: HashMap::new(),
             next_player_id: 1,
         }
     }
@@ -244,8 +263,11 @@ impl GameState {
                 y: SURFACE_Y - 1,
             },
             facing: Facing::Right,
-            dirt: 8,
-            resources: 0,
+            inventory: HashMap::from([
+                ("dirt".to_string(), 8),
+                ("ore".to_string(), 0),
+                ("stone".to_string(), 0),
+            ]),
         };
 
         self.players.insert(player_id, player);
@@ -255,6 +277,7 @@ impl GameState {
     }
 
     pub fn remove_player(&mut self, player_id: u8) {
+        self.dig_progress.remove(&player_id);
         if let Some(player) = self.players.remove(&player_id) {
             self.push_event(format!("{} left the colony", player.name));
         }
@@ -276,7 +299,7 @@ impl GameState {
         match action {
             Action::Move(dir) => self.move_player(player_id, dir),
             Action::Dig(dir) => self.dig(player_id, dir),
-            Action::Place(dir) => self.place(player_id, dir),
+            Action::Place { dir, material } => self.place(player_id, dir, material),
         }
     }
 
@@ -318,7 +341,7 @@ impl GameState {
         let npc_positions: Vec<_> = self.npcs.iter().map(|npc| npc.pos).collect();
         for player in self.players.values_mut() {
             if npc_positions.contains(&player.pos) {
-                player.dirt = player.dirt.saturating_sub(1);
+                let _ = remove_inventory(&mut player.inventory, "dirt", 1);
                 events.push(format!("{} was disturbed by an NPC ant", player.name));
             }
         }
@@ -329,6 +352,7 @@ impl GameState {
     }
 
     fn move_player(&mut self, player_id: u8, dir: MoveDir) {
+        self.dig_progress.remove(&player_id);
         let Some(current) = self.players.get(&player_id).cloned() else {
             return;
         };
@@ -360,24 +384,69 @@ impl GameState {
         let (dx, dy) = dir.delta();
         let target = current.pos.offset(dx, dy);
         let Some(tile) = self.world.tile(target) else {
+            self.dig_progress.remove(&player_id);
             return;
         };
 
-        if tile == Tile::Stone {
-            self.push_event(format!("{} hit solid stone", current.name));
+        if tile == Tile::Empty {
+            self.dig_progress.remove(&player_id);
             return;
         }
-        if tile == Tile::Empty {
+
+        let required_steps = match tile {
+            Tile::Stone => STONE_DIG_STEPS,
+            Tile::Dirt | Tile::Resource => 1,
+            Tile::Empty => 0,
+        };
+
+        let steps = {
+            let entry = self.dig_progress.entry(player_id).or_insert(DigProgress {
+                target,
+                tile,
+                steps: 0,
+                last_tick: self.tick,
+            });
+
+            let is_consecutive = entry.target == target
+                && entry.tile == tile
+                && self.tick.saturating_sub(entry.last_tick) <= 1;
+
+            if !is_consecutive {
+                *entry = DigProgress {
+                    target,
+                    tile,
+                    steps: 0,
+                    last_tick: self.tick,
+                };
+            }
+
+            entry.steps = entry.steps.saturating_add(1);
+            entry.last_tick = self.tick;
+            entry.steps
+        };
+
+        if tile == Tile::Stone && steps < required_steps {
+            let remaining = required_steps.saturating_sub(steps);
+            self.push_event(format!(
+                "{} chips stone ({remaining} digs left)",
+                current.name
+            ));
             return;
         }
 
         self.world.set_tile(target, Tile::Empty);
+        self.dig_progress.remove(&player_id);
         let mut event = None;
         if let Some(player) = self.players.get_mut(&player_id) {
-            player.dirt = player.dirt.saturating_add(1);
-            if tile == Tile::Resource {
-                player.resources = player.resources.saturating_add(1);
-                event = Some(format!("{} found a resource vein", player.name));
+            match tile {
+                Tile::Dirt => add_inventory(&mut player.inventory, "dirt", 1),
+                Tile::Stone => add_inventory(&mut player.inventory, "stone", 1),
+                Tile::Resource => {
+                    add_inventory(&mut player.inventory, "dirt", 1);
+                    add_inventory(&mut player.inventory, "ore", 1);
+                    event = Some(format!("{} found a resource vein", player.name));
+                }
+                Tile::Empty => {}
             }
         }
         if let Some(event) = event {
@@ -385,7 +454,8 @@ impl GameState {
         }
     }
 
-    fn place(&mut self, player_id: u8, dir: MoveDir) {
+    fn place(&mut self, player_id: u8, dir: MoveDir, material: PlaceMaterial) {
+        self.dig_progress.remove(&player_id);
         let Some(current) = self.players.get(&player_id).cloned() else {
             return;
         };
@@ -403,15 +473,24 @@ impl GameState {
         let Some(player) = self.players.get_mut(&player_id) else {
             return;
         };
-        if player.dirt == 0 {
+        let inventory_key = match material {
+            PlaceMaterial::Dirt => "dirt",
+            PlaceMaterial::Stone => "stone",
+        };
+        let tile = match material {
+            PlaceMaterial::Dirt => Tile::Dirt,
+            PlaceMaterial::Stone => Tile::Stone,
+        };
+
+        if inventory_count(&player.inventory, inventory_key) == 0 {
             let name = player.name.clone();
             let _ = player;
-            self.push_event(format!("{name} has no dirt to place"));
+            self.push_event(format!("{name} has no {inventory_key} to place"));
             return;
         }
 
-        player.dirt -= 1;
-        self.world.set_tile(target, Tile::Dirt);
+        remove_inventory(&mut player.inventory, inventory_key, 1);
+        self.world.set_tile(target, tile);
     }
 
     fn occupied_by_actor(&self, pos: Position) -> bool {
@@ -426,6 +505,26 @@ impl GameState {
             self.event_log.drain(0..extra);
         }
     }
+}
+
+fn inventory_count(inventory: &HashMap<String, u16>, key: &str) -> u16 {
+    inventory.get(key).copied().unwrap_or(0)
+}
+
+fn add_inventory(inventory: &mut HashMap<String, u16>, key: &str, amount: u16) {
+    let entry = inventory.entry(key.to_string()).or_insert(0);
+    *entry = entry.saturating_add(amount);
+}
+
+fn remove_inventory(inventory: &mut HashMap<String, u16>, key: &str, amount: u16) -> bool {
+    let Some(entry) = inventory.get_mut(key) else {
+        return false;
+    };
+    if *entry < amount {
+        return false;
+    }
+    *entry -= amount;
+    true
 }
 
 fn nearest_target(origin: Position, positions: &[Position]) -> Option<Position> {
