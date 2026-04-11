@@ -172,10 +172,10 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                 }
                 broadcast_snapshot(&state).await?;
             }
-            ClientMessage::WorldReset => {
+            ClientMessage::WorldReset { seed } => {
                 {
                     let mut game = state.game.lock().await;
-                    game.world_reset();
+                    game.world_reset(seed);
                     let _ = state.persistence_tx.send(PersistMessage::Save(game.snapshot()));
                 }
                 broadcast_snapshot(&state).await?;

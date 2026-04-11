@@ -1,18 +1,19 @@
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const MAX_PLAYERS: usize = 5;
 pub const WORLD_WIDTH: i32 = 160;
-pub const WORLD_HEIGHT: i32 = 80;
 pub const SURFACE_Y: i32 = 18;
 pub const TICK_MILLIS: u64 = 120;
 pub const STONE_DIG_STEPS: u8 = 10;
 pub const DEFAULT_SOIL_SETTLE_FREQUENCY: f64 = 0.01;
 pub const DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS: f64 = 5.0;
+pub const DEFAULT_WORLD_MAX_DEPTH: i32 = -255;
+pub const DEFAULT_WORLD_SEED: u64 = 7;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Position {
     pub x: i32,
     pub y: i32,
@@ -33,6 +34,8 @@ pub enum Tile {
     Dirt,
     Stone,
     Resource,
+    Food,
+    Bedrock,
 }
 
 impl Tile {
@@ -42,6 +45,8 @@ impl Tile {
             Self::Dirt => '.',
             Self::Stone => '#',
             Self::Resource => '*',
+            Self::Food => '%',
+            Self::Bedrock => '=',
         }
     }
 }
@@ -94,35 +99,83 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(seed: u64, width: i32, height: i32) -> Self {
-        let mut tiles = vec![Tile::Empty; (width * height) as usize];
-        let mut rng = StdRng::seed_from_u64(seed);
+    pub fn generate(seed: u64, width: i32, config: &Value) -> Self {
+        let max_depth = config_i32(config, "world.max_depth", DEFAULT_WORLD_MAX_DEPTH).min(-1);
+        let height = SURFACE_Y + max_depth.abs() + 1;
+        let mut world = Self {
+            width,
+            height,
+            tiles: vec![Tile::Empty; (width * height) as usize],
+        };
 
-        for y in 0..height {
-            for x in 0..width {
-                let tile = if y < SURFACE_Y {
+        let terrain_variation =
+            config_i32(config, "world.gen_params.soil.surface_variation", 4).max(0);
+        let dirt_depth = config_i32(config, "world.gen_params.soil.dirt_depth", 8).max(1);
+        let dirt_variation = config_i32(config, "world.gen_params.soil.dirt_variation", 3).max(0);
+        let chunk_width = config_i32(config, "world.gen_params.chunk_width", 16).clamp(4, 64);
+
+        let surface_heights: Vec<i32> = (0..width)
+            .map(|x| {
+                let noise = fbm_1d(seed ^ 0x51_7A_2D, f64::from(x) * 0.045, 3);
+                let offset = (noise * f64::from(terrain_variation)).round() as i32;
+                (SURFACE_Y + offset).clamp(4, height - 3)
+            })
+            .collect();
+
+        for x in 0..width {
+            let surface_y = surface_heights[x as usize];
+            let local_dirt_depth = (dirt_depth
+                + (fbm_1d(seed ^ 0x92_11_4F, f64::from(x) * 0.09, 2) * f64::from(dirt_variation))
+                    .round() as i32)
+                .max(1);
+
+            for y in 0..height {
+                let pos = Position { x, y };
+                let tile = if y < surface_y {
                     Tile::Empty
-                } else if y == SURFACE_Y {
-                    Tile::Dirt
+                } else if y == height - 1 {
+                    Tile::Bedrock
                 } else {
-                    let roll = rng.random_range(0..100);
-                    if roll < 7 {
-                        Tile::Stone
-                    } else if roll < 11 {
-                        Tile::Resource
-                    } else {
+                    let depth = y - surface_y;
+                    if depth <= local_dirt_depth {
                         Tile::Dirt
+                    } else {
+                        Tile::Stone
                     }
                 };
-                tiles[(y * width + x) as usize] = tile;
+                world.set_tile(pos, tile);
             }
         }
 
-        Self {
-            width,
-            height,
-            tiles,
-        }
+        apply_cluster_pass(
+            &mut world,
+            seed ^ 0xA5_0E,
+            chunk_width,
+            Tile::Resource,
+            &DepositConfig::from_config(
+                config,
+                "world.gen_params.ore",
+                2,
+                6,
+                18,
+                20,
+                max_depth.abs() - 8,
+            ),
+            &[Tile::Stone],
+            &surface_heights,
+        );
+
+        apply_cluster_pass(
+            &mut world,
+            seed ^ 0xF0_0D,
+            chunk_width,
+            Tile::Food,
+            &DepositConfig::from_config(config, "world.gen_params.food", 3, 6, 14, 0, 50),
+            &[Tile::Dirt, Tile::Stone],
+            &surface_heights,
+        );
+
+        world
     }
 
     pub fn width(&self) -> i32 {
@@ -152,6 +205,15 @@ impl World {
 
     pub fn is_walkable(&self, pos: Position) -> bool {
         matches!(self.tile(pos), Some(Tile::Empty))
+    }
+
+    pub fn spawn_y_for_column(&self, x: i32) -> i32 {
+        for y in 0..self.height {
+            if self.tile(Position { x, y }) != Some(Tile::Empty) {
+                return y.saturating_sub(1);
+            }
+        }
+        0
     }
 }
 
@@ -184,7 +246,7 @@ pub enum ClientMessage {
     Join { name: String },
     Action(Action),
     ConfigSet { path: String, value: Value },
-    WorldReset,
+    WorldReset { seed: Option<u64> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,49 +287,39 @@ pub struct GameState {
 
 impl GameState {
     pub fn new() -> Self {
-        let seed = 7;
-        let world = World::new(seed, WORLD_WIDTH, WORLD_HEIGHT);
-        let npcs = vec![
-            NpcAnt {
-                id: 1,
-                pos: Position {
-                    x: 20,
-                    y: SURFACE_Y,
-                },
-            },
-            NpcAnt {
-                id: 2,
-                pos: Position {
-                    x: 120,
-                    y: SURFACE_Y + 2,
-                },
-            },
-        ];
+        Self::from_config(default_config())
+    }
+
+    pub fn from_config(config: Value) -> Self {
+        let config = merge_with_default_config(config);
+        let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
+        let world = World::generate(seed, WORLD_WIDTH, &config);
 
         Self {
             tick: 0,
+            npcs: default_npcs(&world),
             world,
             players: HashMap::new(),
-            npcs,
             event_log: vec!["Server booted ant colony".to_string()],
-            config: default_config(),
+            config,
             dig_progress: HashMap::new(),
-            rng: StdRng::seed_from_u64(seed + 1),
+            rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
         }
     }
 
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
-        let seed = 7;
+        let config = merge_with_default_config(snapshot.config);
+        let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
         Self {
             tick: snapshot.tick,
             world: snapshot.world,
             players: HashMap::new(),
             npcs: snapshot.npcs,
             event_log: vec!["Server restored world snapshot".to_string()],
-            config: merge_with_default_config(snapshot.config),
+            config,
             dig_progress: HashMap::new(),
-            rng: StdRng::seed_from_u64(seed + 1),
+            rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
         }
     }
@@ -280,26 +332,21 @@ impl GameState {
         let player_id = self.next_player_id;
         self.next_player_id = self.next_player_id.saturating_add(1);
 
-        let spawn_x = 8 + (self.players.len() as i32 * 6);
+        let spawn_x = (8 + self.players.len() as i32 * 6).min(self.world.width() - 2);
         let player = Player {
             id: player_id,
             name: name.clone(),
             pos: Position {
-                x: spawn_x.min(self.world.width() - 2),
-                y: SURFACE_Y - 1,
+                x: spawn_x,
+                y: self.world.spawn_y_for_column(spawn_x),
             },
             facing: Facing::Right,
-            inventory: HashMap::from([
-                ("dirt".to_string(), 8),
-                ("ore".to_string(), 0),
-                ("stone".to_string(), 0),
-            ]),
+            inventory: default_inventory(),
         };
 
         self.players.insert(player_id, player);
         self.push_event(format!("{name} joined as ant {player_id}"));
-        let snapshot = self.snapshot();
-        Ok((player_id, snapshot))
+        Ok((player_id, self.snapshot()))
     }
 
     pub fn remove_player(&mut self, player_id: u8) {
@@ -336,39 +383,43 @@ impl GameState {
         }
 
         set_config_path(&mut self.config, path, value)?;
+        self.config = merge_with_default_config(self.config.clone());
         self.push_event(format!("Config updated: {path}"));
         Ok(())
     }
 
-    pub fn world_reset(&mut self) {
+    pub fn world_reset(&mut self, seed: Option<u64>) {
+        let config = self.config.clone();
         let existing_players: Vec<(u8, String)> = self
             .players
             .iter()
             .map(|(id, player)| (*id, player.name.clone()))
             .collect();
         let next_player_id = self.next_player_id;
-        *self = Self::new();
+        let mut config = config;
+        if let Some(seed) = seed {
+            let _ = set_config_path(&mut config, "world.seed", Value::from(seed));
+        }
+        *self = Self::from_config(config);
         self.next_player_id = next_player_id;
+
         for (index, (id, name)) in existing_players.into_iter().enumerate() {
-            let spawn_x = 8 + (index as i32 * 6);
+            let spawn_x = (8 + index as i32 * 6).min(self.world.width() - 2);
             self.players.insert(
                 id,
                 Player {
                     id,
                     name,
                     pos: Position {
-                        x: spawn_x.min(self.world.width() - 2),
-                        y: SURFACE_Y - 1,
+                        x: spawn_x,
+                        y: self.world.spawn_y_for_column(spawn_x),
                     },
                     facing: Facing::Right,
-                    inventory: HashMap::from([
-                        ("dirt".to_string(), 8),
-                        ("ore".to_string(), 0),
-                        ("stone".to_string(), 0),
-                    ]),
+                    inventory: default_inventory(),
                 },
             );
         }
+
         self.push_event("World reset by server command".to_string());
         if !self.players.is_empty() {
             self.push_event(format!("Respawned {} connected ants", self.players.len()));
@@ -407,7 +458,7 @@ impl GameState {
                         npc.pos = next;
                         break;
                     }
-                    Some(Tile::Dirt) | Some(Tile::Resource) => {
+                    Some(Tile::Dirt) | Some(Tile::Resource) | Some(Tile::Food) => {
                         self.world.set_tile(next, Tile::Empty);
                         events.push(format!(
                             "NPC ant {} tunneled at {},{}",
@@ -415,7 +466,7 @@ impl GameState {
                         ));
                         break;
                     }
-                    Some(Tile::Stone) | None => {}
+                    Some(Tile::Stone) | Some(Tile::Bedrock) | None => {}
                 }
             }
         }
@@ -445,8 +496,7 @@ impl GameState {
             return;
         }
 
-        let target_tile = self.world.tile(next);
-        if matches!(target_tile, Some(Tile::Empty)) && !self.occupied_by_actor(next) {
+        if matches!(self.world.tile(next), Some(Tile::Empty)) && !self.occupied_by_actor(next) {
             if let Some(player) = self.players.get_mut(&player_id) {
                 player.pos = next;
                 if dx < 0 {
@@ -470,15 +520,23 @@ impl GameState {
             return;
         };
 
-        if tile == Tile::Empty {
-            self.dig_progress.remove(&player_id);
-            return;
+        match tile {
+            Tile::Empty => {
+                self.dig_progress.remove(&player_id);
+                return;
+            }
+            Tile::Bedrock => {
+                self.dig_progress.remove(&player_id);
+                self.push_event(format!("{} hit bedrock", current.name));
+                return;
+            }
+            Tile::Dirt | Tile::Resource | Tile::Food | Tile::Stone => {}
         }
 
         let required_steps = match tile {
             Tile::Stone => STONE_DIG_STEPS,
-            Tile::Dirt | Tile::Resource => 1,
-            Tile::Empty => 0,
+            Tile::Dirt | Tile::Resource | Tile::Food => 1,
+            Tile::Empty | Tile::Bedrock => 0,
         };
 
         let steps = {
@@ -492,7 +550,6 @@ impl GameState {
             let is_consecutive = entry.target == target
                 && entry.tile == tile
                 && self.tick.saturating_sub(entry.last_tick) <= 1;
-
             if !is_consecutive {
                 *entry = DigProgress {
                     target,
@@ -508,10 +565,10 @@ impl GameState {
         };
 
         if tile == Tile::Stone && steps < required_steps {
-            let remaining = required_steps.saturating_sub(steps);
             self.push_event(format!(
-                "{} chips stone ({remaining} digs left)",
-                current.name
+                "{} chips stone ({} digs left)",
+                current.name,
+                required_steps.saturating_sub(steps)
             ));
             return;
         }
@@ -524,11 +581,14 @@ impl GameState {
                 Tile::Dirt => add_inventory(&mut player.inventory, "dirt", 1),
                 Tile::Stone => add_inventory(&mut player.inventory, "stone", 1),
                 Tile::Resource => {
-                    add_inventory(&mut player.inventory, "dirt", 1);
                     add_inventory(&mut player.inventory, "ore", 1);
-                    event = Some(format!("{} found a resource vein", player.name));
+                    event = Some(format!("{} found an ore vein", player.name));
                 }
-                Tile::Empty => {}
+                Tile::Food => {
+                    add_inventory(&mut player.inventory, "food", 1);
+                    event = Some(format!("{} harvested food", player.name));
+                }
+                Tile::Empty | Tile::Bedrock => {}
             }
         }
         if let Some(event) = event {
@@ -547,7 +607,6 @@ impl GameState {
         if !self.world.in_bounds(target) || self.occupied_by_actor(target) {
             return;
         }
-
         if !matches!(self.world.tile(target), Some(Tile::Empty)) {
             return;
         }
@@ -595,7 +654,6 @@ impl GameState {
             DEFAULT_SOIL_SETTLE_FREQUENCY,
         )
         .clamp(0.0, 1.0);
-
         if frequency <= 0.0 {
             return;
         }
@@ -661,21 +719,221 @@ impl GameState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DepositConfig {
+    attempts_per_chunk: i32,
+    cluster_min: i32,
+    cluster_max: i32,
+    min_depth: i32,
+    max_depth: i32,
+}
+
+impl DepositConfig {
+    fn from_config(
+        config: &Value,
+        path: &str,
+        attempts_per_chunk: i32,
+        cluster_min: i32,
+        cluster_max: i32,
+        min_depth: i32,
+        max_depth: i32,
+    ) -> Self {
+        Self {
+            attempts_per_chunk: config_i32(
+                config,
+                &format!("{path}.attempts_per_chunk"),
+                attempts_per_chunk,
+            )
+            .max(0),
+            cluster_min: config_i32(config, &format!("{path}.cluster_min"), cluster_min).max(1),
+            cluster_max: config_i32(config, &format!("{path}.cluster_max"), cluster_max).max(1),
+            min_depth: config_i32(config, &format!("{path}.min_depth"), min_depth).max(0),
+            max_depth: config_i32(config, &format!("{path}.max_depth"), max_depth).max(0),
+        }
+    }
+}
+
 fn default_config() -> Value {
     json!({
         "soil": {
             "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY
         },
         "world": {
-            "snapshot_interval": DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS
+            "seed": DEFAULT_WORLD_SEED,
+            "max_depth": DEFAULT_WORLD_MAX_DEPTH,
+            "snapshot_interval": DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS,
+            "gen_params": {
+                "chunk_width": 16,
+                "soil": {
+                    "surface_variation": 4,
+                    "dirt_depth": 8,
+                    "dirt_variation": 3
+                },
+                "ore": {
+                    "attempts_per_chunk": 2,
+                    "cluster_min": 6,
+                    "cluster_max": 18,
+                    "min_depth": 20,
+                    "max_depth": 220
+                },
+                "food": {
+                    "attempts_per_chunk": 3,
+                    "cluster_min": 6,
+                    "cluster_max": 14,
+                    "min_depth": 0,
+                    "max_depth": 50
+                }
+            }
         }
     })
 }
 
 fn merge_with_default_config(config: Value) -> Value {
     let mut merged = default_config();
-    merge_config_value(&mut merged, config);
+    merge_config_value(&mut merged, migrate_legacy_config(config));
     merged
+}
+
+fn migrate_legacy_config(mut config: Value) -> Value {
+    let Some(root) = config.as_object_mut() else {
+        return config;
+    };
+
+    let terrain = root.remove("terrain");
+    let ore = root.remove("ore");
+    let food = root.remove("food");
+    let chunk_width = root
+        .get_mut("world")
+        .and_then(Value::as_object_mut)
+        .and_then(|world| world.remove("chunk_width"));
+
+    let _ = root;
+
+    if let Some(terrain) = terrain {
+        let _ = set_config_path(&mut config, "world.gen_params.soil", terrain);
+    }
+    if let Some(ore) = ore {
+        let _ = set_config_path(&mut config, "world.gen_params.ore", ore);
+    }
+    if let Some(food) = food {
+        let _ = set_config_path(&mut config, "world.gen_params.food", food);
+    }
+    if let Some(chunk_width) = chunk_width {
+        let _ = set_config_path(&mut config, "world.gen_params.chunk_width", chunk_width);
+    }
+
+    config
+}
+
+fn default_inventory() -> HashMap<String, u16> {
+    HashMap::from([
+        ("dirt".to_string(), 8),
+        ("ore".to_string(), 0),
+        ("stone".to_string(), 0),
+        ("food".to_string(), 0),
+    ])
+}
+
+fn default_npcs(world: &World) -> Vec<NpcAnt> {
+    let surface_1 = world.spawn_y_for_column(20).saturating_add(1);
+    let surface_2 = world.spawn_y_for_column(120).saturating_add(3);
+    vec![
+        NpcAnt {
+            id: 1,
+            pos: Position {
+                x: 20,
+                y: surface_1.min(world.height() - 2),
+            },
+        },
+        NpcAnt {
+            id: 2,
+            pos: Position {
+                x: 120,
+                y: surface_2.min(world.height() - 2),
+            },
+        },
+    ]
+}
+
+fn apply_cluster_pass(
+    world: &mut World,
+    seed: u64,
+    chunk_width: i32,
+    tile: Tile,
+    deposit: &DepositConfig,
+    replaceable: &[Tile],
+    surface_heights: &[i32],
+) {
+    if deposit.attempts_per_chunk == 0 || deposit.max_depth < deposit.min_depth {
+        return;
+    }
+
+    let chunks = (world.width() + chunk_width - 1) / chunk_width;
+    for chunk_x in 0..chunks {
+        let chunk_seed = seed ^ mix_u64(chunk_x as u64);
+        let mut rng = StdRng::seed_from_u64(chunk_seed);
+        let chunk_start = chunk_x * chunk_width;
+        let chunk_end = (chunk_start + chunk_width).min(world.width());
+
+        for _ in 0..deposit.attempts_per_chunk {
+            let center_x = rng.random_range(chunk_start..chunk_end);
+            let surface_y = surface_heights[center_x as usize];
+            let min_y = (surface_y + deposit.min_depth).clamp(0, world.height() - 2);
+            let max_y = (surface_y + deposit.max_depth).clamp(0, world.height() - 2);
+            if min_y > max_y {
+                continue;
+            }
+
+            let center = Position {
+                x: center_x,
+                y: rng.random_range(min_y..=max_y),
+            };
+            let cluster_max = deposit.cluster_max.max(deposit.cluster_min);
+            let target_size = rng.random_range(deposit.cluster_min..=cluster_max);
+            grow_cluster(world, &mut rng, center, target_size, tile, replaceable, min_y, max_y);
+        }
+    }
+}
+
+fn grow_cluster(
+    world: &mut World,
+    rng: &mut StdRng,
+    center: Position,
+    target_size: i32,
+    tile: Tile,
+    replaceable: &[Tile],
+    min_y: i32,
+    max_y: i32,
+) {
+    let mut frontier = vec![center];
+    let mut visited = HashSet::new();
+    let mut placed = 0;
+
+    while placed < target_size && !frontier.is_empty() {
+        let index = rng.random_range(0..frontier.len());
+        let pos = frontier.swap_remove(index);
+        if !visited.insert(pos) || !world.in_bounds(pos) || pos.y < min_y || pos.y > max_y {
+            continue;
+        }
+
+        if let Some(existing) = world.tile(pos) {
+            if replaceable.contains(&existing) {
+                world.set_tile(pos, tile);
+                placed += 1;
+            }
+        }
+
+        for next in [
+            pos.offset(1, 0),
+            pos.offset(-1, 0),
+            pos.offset(0, 1),
+            pos.offset(0, -1),
+        ] {
+            if rng.random::<f64>() < 0.78 {
+                frontier.push(next);
+            }
+        }
+    }
 }
 
 fn inventory_count(inventory: &HashMap<String, u16>, key: &str) -> u16 {
@@ -743,6 +1001,31 @@ fn config_f64(root: &Value, path: &str, default: f64) -> f64 {
     current.as_f64().unwrap_or(default)
 }
 
+fn config_i32(root: &Value, path: &str, default: i32) -> i32 {
+    let mut current = root;
+    for segment in path.split('.').filter(|segment| !segment.trim().is_empty()) {
+        let Some(next) = current.get(segment) else {
+            return default;
+        };
+        current = next;
+    }
+    current
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(default)
+}
+
+fn config_u64(root: &Value, path: &str, default: u64) -> u64 {
+    let mut current = root;
+    for segment in path.split('.').filter(|segment| !segment.trim().is_empty()) {
+        let Some(next) = current.get(segment) else {
+            return default;
+        };
+        current = next;
+    }
+    current.as_u64().unwrap_or(default)
+}
+
 fn merge_config_value(target: &mut Value, incoming: Value) {
     match (target, incoming) {
         (Value::Object(target_map), Value::Object(incoming_map)) => {
@@ -766,6 +1049,51 @@ fn nearest_target(origin: Position, positions: &[Position]) -> Option<Position> 
         .iter()
         .copied()
         .min_by_key(|pos| (pos.x - origin.x).abs() + (pos.y - origin.y).abs())
+}
+
+fn fbm_1d(seed: u64, x: f64, octaves: u32) -> f64 {
+    let mut total = 0.0;
+    let mut amplitude = 1.0;
+    let mut frequency = 1.0;
+    let mut norm = 0.0;
+
+    for octave in 0..octaves {
+        total += value_noise_1d(seed ^ mix_u64(octave as u64), x * frequency) * amplitude;
+        norm += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+
+    if norm == 0.0 { 0.0 } else { total / norm }
+}
+
+fn value_noise_1d(seed: u64, x: f64) -> f64 {
+    let x0 = x.floor() as i64;
+    let x1 = x0 + 1;
+    let t = x - x0 as f64;
+    let v0 = random_unit(seed, x0 as u64);
+    let v1 = random_unit(seed, x1 as u64);
+    lerp(v0, v1, smoothstep(t))
+}
+
+fn smoothstep(t: f64) -> f64 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+fn random_unit(seed: u64, value: u64) -> f64 {
+    let mixed = mix_u64(seed ^ value);
+    (mixed as f64 / u64::MAX as f64) * 2.0 - 1.0
+}
+
+fn mix_u64(value: u64) -> u64 {
+    let mut z = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[derive(Debug, Clone, Copy)]

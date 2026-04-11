@@ -36,6 +36,7 @@ struct App {
     snapshot: Snapshot,
     show_help: bool,
     show_params: bool,
+    params_scroll: u16,
     show_events: bool,
     pending_command: PendingCommand,
     command_input: Option<String>,
@@ -66,6 +67,7 @@ impl App {
             snapshot,
             show_help: true,
             show_params: false,
+            params_scroll: 0,
             show_events: false,
             pending_command: PendingCommand::None,
             command_input: None,
@@ -98,6 +100,7 @@ impl App {
         self.command_input = None;
         self.command_feedback = None;
         self.show_params = false;
+        self.params_scroll = 0;
         self.action_animation = None;
         self.last_error = Some(message);
     }
@@ -107,6 +110,11 @@ impl App {
         self.snapshot = snapshot;
         self.reconnecting = false;
         self.last_error = None;
+    }
+
+    fn open_params(&mut self) {
+        self.show_params = true;
+        self.params_scroll = 0;
     }
 }
 
@@ -268,6 +276,30 @@ async fn handle_event(
         return Ok(false);
     }
 
+    if app.show_params {
+        match key.code {
+            KeyCode::Esc => {
+                app.show_params = false;
+                app.params_scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.params_scroll = app.params_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.params_scroll = app.params_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                app.params_scroll = app.params_scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                app.params_scroll = app.params_scroll.saturating_sub(10);
+            }
+            KeyCode::Char('q') => return Ok(true),
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     if app.command_input.is_some() {
         return handle_command_input(key.code, app, writer).await;
     }
@@ -311,6 +343,7 @@ async fn handle_event(
             app.command_input = None;
             app.command_feedback = None;
             app.show_params = false;
+            app.params_scroll = 0;
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('e') => app.show_events = !app.show_events,
@@ -418,19 +451,27 @@ async fn submit_command(
     }
 
     if trimmed == "/sc show_params" {
-        app.show_params = true;
+        app.open_params();
         app.last_error = None;
         return Ok(());
     }
 
     if head == "/sc" && verb == "world_reset" {
-        send_message(writer, ClientMessage::WorldReset).await?;
+        let seed = if path.is_empty() {
+            None
+        } else {
+            Some(
+                path.parse::<u64>()
+                    .map_err(|_| anyhow::anyhow!("world_reset seed must be an unsigned integer"))?,
+            )
+        };
+        send_message(writer, ClientMessage::WorldReset { seed }).await?;
         app.last_error = None;
         return Ok(());
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.last_error = Some("expected: /help, /sc show_params, /sc world_reset, or /sc set <path> <value>".to_string());
+        app.last_error = Some("expected: /help, /sc show_params, /sc world_reset [seed], or /sc set <path> <value>".to_string());
         return Ok(());
     }
 
@@ -474,7 +515,11 @@ fn command_suggestion(input: &str) -> Option<String> {
         "/help",
         "/sc show_params",
         "/sc world_reset",
+        "/sc world_reset 42",
         "/sc set soil.settle_frequency 0.01",
+        "/sc set world.gen_params.soil.dirt_depth 8",
+        "/sc set world.gen_params.ore.cluster_max 18",
+        "/sc set world.gen_params.food.max_depth 50",
         "/sc set world.snapshot_interval 5.0",
     ];
 
@@ -496,7 +541,11 @@ fn autocomplete_command(input: &mut String) {
         "/help",
         "/sc show_params",
         "/sc world_reset",
+        "/sc world_reset 42",
         "/sc set soil.settle_frequency 0.01",
+        "/sc set world.gen_params.soil.dirt_depth 8",
+        "/sc set world.gen_params.ore.cluster_max 18",
+        "/sc set world.gen_params.food.max_depth 50",
         "/sc set world.snapshot_interval 5.0",
     ];
 
@@ -575,9 +624,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let dirt = player.inventory.get("dirt").copied().unwrap_or(0);
         let ore = player.inventory.get("ore").copied().unwrap_or(0);
         let stone = player.inventory.get("stone").copied().unwrap_or(0);
+        let food = player.inventory.get("food").copied().unwrap_or(0);
         top.push(Span::raw(format!(
-            "  ant={} dirt={} ore={} stone={} pos=({}, {})",
-            player.id, dirt, ore, stone, player.pos.x, player.pos.y
+            "  ant={} dirt={} ore={} stone={} food={} pos=({}, {})",
+            player.id, dirt, ore, stone, food, player.pos.x, player.pos.y
         )));
     }
 
@@ -713,6 +763,8 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         Tile::Dirt => Span::styled("▓▓", Style::default().fg(Color::Gray)),
         Tile::Stone => Span::styled("██", Style::default().fg(Color::White)),
         Tile::Resource => Span::styled("▒▒", Style::default().fg(Color::LightCyan)),
+        Tile::Food => Span::styled("&&", Style::default().fg(Color::Green)),
+        Tile::Bedrock => Span::styled("██", Style::default().fg(Color::DarkGray)),
     }
 }
 
@@ -760,12 +812,17 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("/help"),
         Line::from("/sc show_params"),
         Line::from("/sc set soil.settle_frequency 0.01"),
+        Line::from("/sc set world.max_depth -255"),
+        Line::from("/sc set world.gen_params.soil.dirt_depth 8"),
+        Line::from("/sc set world.gen_params.ore.cluster_max 18"),
+        Line::from("/sc set world.gen_params.food.max_depth 50"),
         Line::from("/sc set world.snapshot_interval 5.0"),
         Line::from("/sc world_reset"),
+        Line::from("/sc world_reset 42"),
         Line::from("Tab: autocomplete slash command"),
         Line::from("e: toggle event pane"),
         Line::from("? : toggle help"),
-        Line::from("Esc: cancel place command or slash command"),
+        Line::from("Esc: cancel place/slash/params modal"),
         Line::from("q: quit"),
         Line::from(""),
         Line::from(mode_line),
@@ -804,12 +861,15 @@ fn draw_params_modal(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|_| "{\"error\":\"failed to render config\"}".to_string());
     let mut lines: Vec<Line> = pretty.lines().map(Line::from).collect();
     lines.push(Line::from(""));
+    lines.push(Line::from("j/k or arrows: scroll"));
+    lines.push(Line::from("PgUp/PgDn: faster scroll"));
     lines.push(Line::from("Esc: close"));
 
     frame.render_widget(Clear, area);
     let modal = Paragraph::new(lines)
         .block(Block::default().title("Server Params").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((app.params_scroll, 0));
     frame.render_widget(modal, area);
 }
 

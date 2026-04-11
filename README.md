@@ -18,6 +18,9 @@ Cross-platform terminal ant colony game prototype in Rust.
 - placing dirt back into the world
 - placing stone back into the world
 - stone obstacles
+- deterministic layered world generation with configurable seed and max depth
+- bedrock at configured max depth
+- shallow food veins and deeper ore veins
 - config-driven soil settling
 - SQLite snapshot persistence with startup restore
 - NPC ants that tunnel toward players and disturb them
@@ -37,6 +40,6 @@ In one or more additional terminals:
 cargo run -p antfarm-tui -- scout
 ```
 
-Use `h j k l` to move; filled tiles auto-dig. Use `p d h/j/k/l` to place dirt and `p s h/j/k/l` to place stone. Press `/` to enter a slash command like `/sc set soil.settle_frequency 0.01` or `/sc world_reset`, `?` to toggle the help modal, and `q` to quit.
+Use `h j k l` to move; filled tiles auto-dig. Use `Space d h/j/k/l` to place dirt and `Space s h/j/k/l` to place stone. Press `/` to enter a slash command like `/sc set soil.settle_frequency 0.01`, `/sc set world.max_depth -255`, `/sc show_params`, or `/sc world_reset`, `?` to toggle the help modal, and `q` to quit.
 
 The server saves the latest world snapshots to `data/antfarm.sqlite3`, restores the newest one on startup, snapshots every `world.snapshot_interval` seconds by default, and prunes history down to the newest 10 snapshots after each save.
