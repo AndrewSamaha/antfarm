@@ -99,14 +99,18 @@ pub struct World {
 }
 
 impl World {
-    pub fn generate(seed: u64, width: i32, config: &Value) -> Self {
-        let max_depth = config_i32(config, "world.max_depth", DEFAULT_WORLD_MAX_DEPTH).min(-1);
-        let height = SURFACE_Y + max_depth.abs() + 1;
-        let mut world = Self {
+    pub fn empty(width: i32, height: i32) -> Self {
+        Self {
             width,
             height,
             tiles: vec![Tile::Empty; (width * height) as usize],
-        };
+        }
+    }
+
+    pub fn generate(seed: u64, width: i32, config: &Value) -> Self {
+        let max_depth = config_i32(config, "world.max_depth", DEFAULT_WORLD_MAX_DEPTH).min(-1);
+        let height = SURFACE_Y + max_depth.abs() + 1;
+        let mut world = Self::empty(width, height);
 
         let terrain_variation =
             config_i32(config, "world.gen_params.soil.surface_variation", 4).max(0);
@@ -222,6 +226,33 @@ impl World {
         true
     }
 
+    pub fn row_tiles(&self, row: i32) -> Vec<Tile> {
+        if row < 0 || row >= self.height {
+            return Vec::new();
+        }
+        (0..self.width)
+            .filter_map(|x| self.tile(Position { x, y: row }))
+            .collect()
+    }
+
+    pub fn set_row_tiles(&mut self, row: i32, tiles: &[Tile]) {
+        if row < 0 || row >= self.height {
+            return;
+        }
+        for (x, tile) in tiles.iter().enumerate() {
+            if x as i32 >= self.width {
+                break;
+            }
+            let _ = self.set_tile(
+                Position {
+                    x: x as i32,
+                    y: row,
+                },
+                *tile,
+            );
+        }
+    }
+
     pub fn is_walkable(&self, pos: Position) -> bool {
         matches!(self.tile(pos), Some(Tile::Empty))
     }
@@ -255,12 +286,6 @@ pub struct DigProgress {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JoinAck {
-    pub player_id: u8,
-    pub snapshot: Snapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     Join { name: String },
     Action(Action),
@@ -270,9 +295,50 @@ pub enum ClientMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
-    Joined(JoinAck),
-    Snapshot(Snapshot),
+    FullSyncStart(FullSyncStart),
+    FullSyncChunk(FullSyncChunk),
+    FullSyncComplete(FullSyncComplete),
+    Patch(PatchFrame),
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullSyncStart {
+    pub player_id: u8,
+    pub tick: u64,
+    pub world_width: i32,
+    pub world_height: i32,
+    pub total_rows: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullSyncChunk {
+    pub start_row: i32,
+    pub rows: Vec<Vec<Tile>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullSyncComplete {
+    pub players: Vec<Player>,
+    pub npcs: Vec<NpcAnt>,
+    pub event_log: Vec<String>,
+    pub config: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchFrame {
+    pub tick: u64,
+    pub tiles: Vec<TileUpdate>,
+    pub players: Option<Vec<Player>>,
+    pub npcs: Option<Vec<NpcAnt>>,
+    pub event_log: Option<Vec<String>>,
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TileUpdate {
+    pub pos: Position,
+    pub tile: Tile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +366,11 @@ pub struct GameState {
     pub event_log: Vec<String>,
     pub config: Value,
     dig_progress: HashMap<u8, DigProgress>,
+    dirty_tiles: HashMap<Position, Tile>,
+    players_dirty: bool,
+    npcs_dirty: bool,
+    event_log_dirty: bool,
+    config_dirty: bool,
     rng: StdRng,
     next_player_id: u8,
 }
@@ -322,6 +393,11 @@ impl GameState {
             event_log: vec!["Server booted ant colony".to_string()],
             config,
             dig_progress: HashMap::new(),
+            dirty_tiles: HashMap::new(),
+            players_dirty: true,
+            npcs_dirty: true,
+            event_log_dirty: true,
+            config_dirty: true,
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
         }
@@ -338,6 +414,11 @@ impl GameState {
             event_log: vec!["Server restored world snapshot".to_string()],
             config,
             dig_progress: HashMap::new(),
+            dirty_tiles: HashMap::new(),
+            players_dirty: true,
+            npcs_dirty: true,
+            event_log_dirty: true,
+            config_dirty: true,
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
         }
@@ -364,6 +445,7 @@ impl GameState {
         };
 
         self.players.insert(player_id, player);
+        self.players_dirty = true;
         self.push_event(format!("{name} joined as ant {player_id}"));
         Ok((player_id, self.snapshot()))
     }
@@ -371,6 +453,7 @@ impl GameState {
     pub fn remove_player(&mut self, player_id: u8) {
         self.dig_progress.remove(&player_id);
         if let Some(player) = self.players.remove(&player_id) {
+            self.players_dirty = true;
             self.push_event(format!("{} left the colony", player.name));
         }
     }
@@ -403,6 +486,7 @@ impl GameState {
 
         set_config_path(&mut self.config, path, value)?;
         self.config = merge_with_default_config(self.config.clone());
+        self.config_dirty = true;
         self.push_event(format!("Config updated: {path}"));
         Ok(())
     }
@@ -439,6 +523,7 @@ impl GameState {
             );
         }
 
+        self.players_dirty = true;
         self.push_event("World reset by server command".to_string());
         if !self.players.is_empty() {
             self.push_event(format!("Respawned {} connected ants", self.players.len()));
@@ -460,28 +545,31 @@ impl GameState {
 
         let player_positions: Vec<_> = self.players.values().map(|player| player.pos).collect();
         let mut events = Vec::new();
-        for npc in &mut self.npcs {
-            let Some(target) = nearest_target(npc.pos, &player_positions) else {
+        for index in 0..self.npcs.len() {
+            let npc_pos = self.npcs[index].pos;
+            let npc_id = self.npcs[index].id;
+            let Some(target) = nearest_target(npc_pos, &player_positions) else {
                 continue;
             };
 
-            let dx = (target.x - npc.pos.x).signum();
-            let dy = (target.y - npc.pos.y).signum();
+            let dx = (target.x - npc_pos.x).signum();
+            let dy = (target.y - npc_pos.y).signum();
 
-            for next in [npc.pos.offset(dx, 0), npc.pos.offset(0, dy)] {
+            for next in [npc_pos.offset(dx, 0), npc_pos.offset(0, dy)] {
                 if !self.world.in_bounds(next) {
                     continue;
                 }
                 match self.world.tile(next) {
                     Some(Tile::Empty) => {
-                        npc.pos = next;
+                        self.npcs[index].pos = next;
+                        self.npcs_dirty = true;
                         break;
                     }
                     Some(Tile::Dirt) | Some(Tile::Resource) | Some(Tile::Food) => {
-                        self.world.set_tile(next, Tile::Empty);
+                        self.set_world_tile(next, Tile::Empty);
                         events.push(format!(
                             "NPC ant {} tunneled at {},{}",
-                            npc.id, next.x, next.y
+                            npc_id, next.x, next.y
                         ));
                         break;
                     }
@@ -494,6 +582,7 @@ impl GameState {
         for player in self.players.values_mut() {
             if npc_positions.contains(&player.pos) {
                 let _ = remove_inventory(&mut player.inventory, "dirt", 1);
+                self.players_dirty = true;
                 events.push(format!("{} was disturbed by an NPC ant", player.name));
             }
         }
@@ -523,6 +612,7 @@ impl GameState {
                 } else if dx > 0 {
                     player.facing = Facing::Right;
                 }
+                self.players_dirty = true;
             }
         }
     }
@@ -592,7 +682,7 @@ impl GameState {
             return;
         }
 
-        self.world.set_tile(target, Tile::Empty);
+        self.set_world_tile(target, Tile::Empty);
         self.dig_progress.remove(&player_id);
         let mut event = None;
         if let Some(player) = self.players.get_mut(&player_id) {
@@ -609,6 +699,7 @@ impl GameState {
                 }
                 Tile::Empty | Tile::Bedrock => {}
             }
+            self.players_dirty = true;
         }
         if let Some(event) = event {
             self.push_event(event);
@@ -650,7 +741,8 @@ impl GameState {
         }
 
         remove_inventory(&mut player.inventory, inventory_key, 1);
-        self.world.set_tile(target, tile);
+        self.set_world_tile(target, tile);
+        self.players_dirty = true;
     }
 
     fn occupied_by_actor(&self, pos: Position) -> bool {
@@ -663,6 +755,16 @@ impl GameState {
         if self.event_log.len() > 8 {
             let extra = self.event_log.len() - 8;
             self.event_log.drain(0..extra);
+        }
+        self.event_log_dirty = true;
+    }
+
+    fn set_world_tile(&mut self, pos: Position, tile: Tile) {
+        if self.world.tile(pos) == Some(tile) {
+            return;
+        }
+        if self.world.set_tile(pos, tile) {
+            self.dirty_tiles.insert(pos, tile);
         }
     }
 
@@ -731,10 +833,52 @@ impl GameState {
                     continue;
                 };
 
-                self.world.set_tile(pos, Tile::Empty);
-                self.world.set_tile(target, Tile::Dirt);
+                self.set_world_tile(pos, Tile::Empty);
+                self.set_world_tile(target, Tile::Dirt);
             }
         }
+    }
+
+    pub fn take_patch(&mut self) -> Option<PatchFrame> {
+        if self.dirty_tiles.is_empty()
+            && !self.players_dirty
+            && !self.npcs_dirty
+            && !self.event_log_dirty
+            && !self.config_dirty
+        {
+            return None;
+        }
+
+        let mut tiles: Vec<_> = self
+            .dirty_tiles
+            .drain()
+            .map(|(pos, tile)| TileUpdate { pos, tile })
+            .collect();
+        tiles.sort_by_key(|update| (update.pos.y, update.pos.x));
+
+        let players = self.players_dirty.then(|| {
+            let mut players: Vec<_> = self.players.values().cloned().collect();
+            players.sort_by_key(|player| player.id);
+            players
+        });
+
+        let npcs = self.npcs_dirty.then(|| self.npcs.clone());
+        let event_log = self.event_log_dirty.then(|| self.event_log.clone());
+        let config = self.config_dirty.then(|| self.config.clone());
+
+        self.players_dirty = false;
+        self.npcs_dirty = false;
+        self.event_log_dirty = false;
+        self.config_dirty = false;
+
+        Some(PatchFrame {
+            tick: self.tick,
+            tiles,
+            players,
+            npcs,
+            event_log,
+            config,
+        })
     }
 }
 

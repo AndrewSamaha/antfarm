@@ -1,6 +1,6 @@
 use antfarm_core::{
-    ClientMessage, GameState, JoinAck, ServerMessage, Snapshot, TICK_MILLIS,
-    default_server_config,
+    ClientMessage, FullSyncChunk, FullSyncComplete, FullSyncStart, GameState, PatchFrame,
+    ServerMessage, Snapshot, TICK_MILLIS, default_server_config,
 };
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
@@ -24,6 +24,7 @@ const SERVER_ADDR: &str = "127.0.0.1:7000";
 const SNAPSHOT_DB_PATH: &str = "data/antfarm.sqlite3";
 const SNAPSHOT_RETENTION: i64 = 10;
 const HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
+const FULL_SYNC_ROWS_PER_CHUNK: i32 = 16;
 
 type ClientTx = tokio::sync::mpsc::UnboundedSender<ServerMessage>;
 
@@ -75,25 +76,27 @@ async fn main() -> Result<()> {
             let mut last_snapshot_at = Instant::now();
             loop {
                 ticker.tick().await;
-                let maybe_snapshot = {
+                let (maybe_patch, maybe_snapshot) = {
                     let mut game = tick_state.game.lock().await;
                     game.tick();
-
+                    let patch = game.take_patch();
                     let interval = Duration::from_secs_f64(game.snapshot_interval_seconds());
-                    if last_snapshot_at.elapsed() >= interval {
+                    let snapshot = if last_snapshot_at.elapsed() >= interval {
                         last_snapshot_at = Instant::now();
                         Some(game.snapshot())
                     } else {
                         None
-                    }
+                    };
+                    (patch, snapshot)
                 };
 
                 if let Some(snapshot) = maybe_snapshot {
                     let _ = tick_state.persistence_tx.send(PersistMessage::Save(snapshot));
                 }
-
-                if let Err(error) = broadcast_snapshot(&tick_state).await {
-                    eprintln!("broadcast error: {error}");
+                if let Some(patch) = maybe_patch {
+                    if let Err(error) = broadcast_patch(&tick_state, &patch, None).await {
+                        emit_log("patch_broadcast_error", json!({ "error": error.to_string() }));
+                    }
                 }
             }
         });
@@ -158,32 +161,27 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     continue;
                 }
 
-                let joined = {
+                let (id, snapshot, join_patch) = {
                     let mut game = state.game.lock().await;
-                    game.add_player(name)
+                    let (id, snapshot) = game.add_player(name).map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    (id, snapshot, patch)
                 };
 
-                match joined {
-                    Ok((id, snapshot)) => {
-                        state.clients.lock().await.insert(id, tx.clone());
-                        player_id = Some(id);
-                        emit_log(
-                            "player_join",
-                            json!({
-                                "player_id": id,
-                                "name": snapshot.players.iter().find(|player| player.id == id).map(|player| player.name.clone()),
-                                "connected_players": snapshot.players.len(),
-                            }),
-                        );
-                        tx.send(ServerMessage::Joined(JoinAck {
-                            player_id: id,
-                            snapshot,
-                        }))?;
-                        broadcast_snapshot(&state).await?;
-                    }
-                    Err(message) => {
-                        tx.send(ServerMessage::Error { message })?;
-                    }
+                state.clients.lock().await.insert(id, tx.clone());
+                player_id = Some(id);
+                emit_log(
+                    "player_join",
+                    json!({
+                        "player_id": id,
+                        "name": snapshot.players.iter().find(|player| player.id == id).map(|player| player.name.clone()),
+                        "connected_players": snapshot.players.len(),
+                    }),
+                );
+
+                send_full_sync(&tx, id, &snapshot)?;
+                if let Some(patch) = join_patch {
+                    broadcast_patch(&state, &patch, Some(id)).await?;
                 }
             }
             ClientMessage::Action(action) => {
@@ -194,11 +192,14 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     continue;
                 };
 
-                {
+                let maybe_patch = {
                     let mut game = state.game.lock().await;
                     game.apply_action(id, action);
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
                 }
-                broadcast_snapshot(&state).await?;
             }
             ClientMessage::ConfigSet { path, value } => {
                 let Some(_id) = player_id else {
@@ -209,34 +210,27 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                 };
 
                 let logged_value = value.clone();
-                let result = {
+                let (maybe_patch, snapshot) = {
                     let mut game = state.game.lock().await;
                     game.set_config_value(&path, value)
+                        .map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
                 };
 
-                if let Err(message) = result {
-                    tx.send(ServerMessage::Error { message })?;
-                    continue;
+                emit_log("sc_set", json!({ "path": path, "value": logged_value }));
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
                 }
-
-                emit_log(
-                    "sc_set",
-                    json!({
-                        "path": path,
-                        "value": logged_value,
-                    }),
-                );
-
-                {
-                    let game = state.game.lock().await;
-                    let _ = state.persistence_tx.send(PersistMessage::Save(game.snapshot()));
-                }
-                broadcast_snapshot(&state).await?;
             }
             ClientMessage::WorldReset { seed } => {
-                {
+                let snapshot = {
                     let mut game = state.game.lock().await;
                     game.world_reset(seed);
+                    let snapshot = game.snapshot();
+                    let _ = game.take_patch();
                     emit_log(
                         "world_reset",
                         json!({
@@ -244,16 +238,17 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                             "world": world_log_fields(&game),
                         }),
                     );
-                    let _ = state.persistence_tx.send(PersistMessage::Save(game.snapshot()));
-                }
-                broadcast_snapshot(&state).await?;
+                    snapshot
+                };
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot.clone()));
+                broadcast_full_sync(&state, &snapshot).await?;
             }
         }
     }
 
     if let Some(id) = player_id {
         state.clients.lock().await.remove(&id);
-        {
+        let maybe_patch = {
             let mut game = state.game.lock().await;
             let player_name = game.players.get(&id).map(|player| player.name.clone());
             game.remove_player(id);
@@ -265,24 +260,68 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     "connected_players": game.players.len(),
                 }),
             );
+            game.take_patch()
+        };
+        if let Some(patch) = maybe_patch {
+            broadcast_patch(&state, &patch, None).await?;
         }
-        broadcast_snapshot(&state).await?;
     }
 
     writer_task.abort();
     Ok(())
 }
 
-async fn broadcast_snapshot(state: &ServerState) -> Result<()> {
-    let snapshot = {
-        let game = state.game.lock().await;
-        game.snapshot()
-    };
-
+async fn broadcast_patch(
+    state: &ServerState,
+    patch: &PatchFrame,
+    exclude_player_id: Option<u8>,
+) -> Result<()> {
     let clients = state.clients.lock().await;
-    for tx in clients.values() {
-        let _ = tx.send(ServerMessage::Snapshot(snapshot.clone()));
+    for (player_id, tx) in clients.iter() {
+        if Some(*player_id) == exclude_player_id {
+            continue;
+        }
+        let _ = tx.send(ServerMessage::Patch(patch.clone()));
     }
+    Ok(())
+}
+
+async fn broadcast_full_sync(state: &ServerState, snapshot: &Snapshot) -> Result<()> {
+    let clients = state.clients.lock().await;
+    for (player_id, tx) in clients.iter() {
+        send_full_sync(tx, *player_id, snapshot)?;
+    }
+    Ok(())
+}
+
+fn send_full_sync(tx: &ClientTx, player_id: u8, snapshot: &Snapshot) -> Result<()> {
+    tx.send(ServerMessage::FullSyncStart(FullSyncStart {
+        player_id,
+        tick: snapshot.tick,
+        world_width: snapshot.world.width(),
+        world_height: snapshot.world.height(),
+        total_rows: snapshot.world.height(),
+    }))?;
+
+    let mut row = 0;
+    while row < snapshot.world.height() {
+        let end = (row + FULL_SYNC_ROWS_PER_CHUNK).min(snapshot.world.height());
+        let rows = (row..end)
+            .map(|y| snapshot.world.row_tiles(y))
+            .collect();
+        tx.send(ServerMessage::FullSyncChunk(FullSyncChunk {
+            start_row: row,
+            rows,
+        }))?;
+        row = end;
+    }
+
+    tx.send(ServerMessage::FullSyncComplete(FullSyncComplete {
+        players: snapshot.players.clone(),
+        npcs: snapshot.npcs.clone(),
+        event_log: snapshot.event_log.clone(),
+        config: snapshot.config.clone(),
+    }))?;
     Ok(())
 }
 
@@ -329,10 +368,7 @@ fn persistence_worker_loop(path: PathBuf, rx: mpsc::Receiver<PersistMessage>) ->
                 prune_snapshots(&connection)?;
                 emit_log(
                     "snapshot_saved",
-                    json!({
-                        "tick": snapshot.tick,
-                        "retention": SNAPSHOT_RETENTION,
-                    }),
+                    json!({ "tick": snapshot.tick, "retention": SNAPSHOT_RETENTION }),
                 );
             }
         }
@@ -362,18 +398,15 @@ fn load_latest_snapshot(path: &Path) -> Result<Option<Snapshot>> {
     if !path.exists() {
         return Ok(None);
     }
-
     let connection = open_db(path)?;
-    let mut statement = connection.prepare(
-        "SELECT state_json FROM world_snapshots ORDER BY id DESC LIMIT 1",
-    )?;
+    let mut statement =
+        connection.prepare("SELECT state_json FROM world_snapshots ORDER BY id DESC LIMIT 1")?;
     let mut rows = statement.query([])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
     let state_json: String = row.get(0)?;
-    let snapshot = serde_json::from_str::<Snapshot>(&state_json)?;
-    Ok(Some(snapshot))
+    Ok(Some(serde_json::from_str::<Snapshot>(&state_json)?))
 }
 
 fn save_snapshot(connection: &Connection, snapshot: &Snapshot) -> Result<()> {
@@ -390,10 +423,7 @@ fn prune_snapshots(connection: &Connection) -> Result<()> {
         "
         DELETE FROM world_snapshots
         WHERE id NOT IN (
-            SELECT id
-            FROM world_snapshots
-            ORDER BY id DESC
-            LIMIT ?1
+            SELECT id FROM world_snapshots ORDER BY id DESC LIMIT ?1
         )
         ",
         params![SNAPSHOT_RETENTION],

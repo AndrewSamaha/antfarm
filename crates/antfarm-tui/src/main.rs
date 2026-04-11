@@ -1,6 +1,7 @@
 use antfarm_core::{
-    Action, ClientMessage, GameState, MoveDir, PlaceMaterial, Player, Position, SURFACE_Y,
-    ServerMessage, Snapshot, Tile, Viewport,
+    Action, ClientMessage, FullSyncChunk, FullSyncComplete, FullSyncStart, MoveDir, PlaceMaterial,
+    PatchFrame, Player, Position, SURFACE_Y, ServerMessage, Snapshot, Tile, Viewport, World,
+    default_server_config,
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -45,7 +46,15 @@ struct App {
     command_history_index: Option<usize>,
     last_error: Option<String>,
     action_animation: Option<ActionAnimation>,
-    reconnecting: bool,
+    sync_state: SyncState,
+}
+
+#[derive(Debug, Clone)]
+enum SyncState {
+    Connecting,
+    Syncing { received_rows: i32, total_rows: i32 },
+    Ready,
+    Reconnecting,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +87,7 @@ impl App {
             command_history_index: None,
             last_error: None,
             action_animation: None,
-            reconnecting: false,
+            sync_state: SyncState::Connecting,
         }
     }
 
@@ -99,7 +108,7 @@ impl App {
     }
 
     fn enter_reconnecting(&mut self, message: String) {
-        self.reconnecting = true;
+        self.sync_state = SyncState::Reconnecting;
         self.pending_command = PendingCommand::None;
         self.command_input = None;
         self.command_feedback = None;
@@ -110,16 +119,59 @@ impl App {
         self.last_error = Some(message);
     }
 
-    fn restore_connection(&mut self, player_id: u8, snapshot: Snapshot) {
-        self.player_id = player_id;
-        self.snapshot = snapshot;
-        self.reconnecting = false;
+    fn begin_syncing(&mut self) {
+        self.sync_state = SyncState::Syncing {
+            received_rows: 0,
+            total_rows: 0,
+        };
+        self.last_error = None;
+    }
+
+    fn start_full_sync(&mut self, start: &FullSyncStart) {
+        self.player_id = start.player_id;
+        self.snapshot.tick = start.tick;
+        self.snapshot.world = World::empty(start.world_width, start.world_height);
+        self.snapshot.players.clear();
+        self.snapshot.npcs.clear();
+        self.snapshot.event_log.clear();
+        self.snapshot.config = default_server_config();
+        self.sync_state = SyncState::Syncing {
+            received_rows: 0,
+            total_rows: start.total_rows,
+        };
+    }
+
+    fn apply_full_sync_chunk(&mut self, chunk: &FullSyncChunk) {
+        for (offset, row) in chunk.rows.iter().enumerate() {
+            self.snapshot
+                .world
+                .set_row_tiles(chunk.start_row + offset as i32, row);
+        }
+        if let SyncState::Syncing {
+            received_rows,
+            total_rows: _,
+        } = &mut self.sync_state
+        {
+            *received_rows = (*received_rows).max(chunk.start_row + chunk.rows.len() as i32);
+        }
+    }
+
+    fn finish_full_sync(&mut self, complete: FullSyncComplete) {
+        self.snapshot.players = complete.players;
+        self.snapshot.npcs = complete.npcs;
+        self.snapshot.event_log = complete.event_log;
+        self.snapshot.config = complete.config;
+        self.sync_state = SyncState::Ready;
         self.last_error = None;
     }
 
     fn open_params(&mut self) {
         self.show_params = true;
         self.params_scroll = 0;
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self.sync_state, SyncState::Ready)
     }
 }
 
@@ -148,7 +200,7 @@ async fn main() -> Result<()> {
 
 async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {
     let mut app = App::new(player_name.clone(), 0, offline_snapshot());
-    app.enter_reconnecting("attempting to reconnect".to_string());
+    app.sync_state = SyncState::Connecting;
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
     let mut reconnect = time::interval(Duration::from_millis(1000));
@@ -162,8 +214,8 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
             _ = redraw.tick() => app.tick_animation(),
             _ = reconnect.tick(), if connection.is_none() => {
                 match timeout(RECONNECT_ATTEMPT_TIMEOUT, connect_session(&app.player_name)).await {
-                    Ok(Ok((player_id, snapshot, new_connection))) => {
-                        app.restore_connection(player_id, snapshot);
+                    Ok(Ok(new_connection)) => {
+                        app.begin_syncing();
                         connection = Some(new_connection);
                     }
                     Ok(Err(_)) | Err(_) => {
@@ -173,9 +225,11 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
             }
             maybe_message = recv_server_message(&mut connection), if connection.is_some() => {
                 match maybe_message {
-                    Some(ServerMessage::Snapshot(snapshot)) => app.snapshot = snapshot,
+                    Some(ServerMessage::FullSyncStart(start)) => app.start_full_sync(&start),
+                    Some(ServerMessage::FullSyncChunk(chunk)) => app.apply_full_sync_chunk(&chunk),
+                    Some(ServerMessage::FullSyncComplete(complete)) => app.finish_full_sync(complete),
+                    Some(ServerMessage::Patch(patch)) => apply_patch_frame(&mut app, patch),
                     Some(ServerMessage::Error { message }) => app.last_error = Some(message),
-                    Some(ServerMessage::Joined(_)) => {}
                     None => {
                         connection = None;
                         app.enter_reconnecting("attempting to reconnect".to_string());
@@ -196,7 +250,7 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
     Ok(())
 }
 
-async fn connect_session(player_name: &str) -> Result<(u8, Snapshot, Connection)> {
+async fn connect_session(player_name: &str) -> Result<Connection> {
     let stream = timeout(
         RECONNECT_ATTEMPT_TIMEOUT,
         TcpStream::connect("127.0.0.1:7000"),
@@ -213,21 +267,6 @@ async fn connect_session(player_name: &str) -> Result<(u8, Snapshot, Connection)
     })?;
     writer.write_all(join.as_bytes()).await?;
     writer.write_all(b"\n").await?;
-
-    let joined = timeout(RECONNECT_ATTEMPT_TIMEOUT, async {
-        loop {
-            let Some(line) = lines.next_line().await? else {
-                anyhow::bail!("server closed before join completed");
-            };
-            match serde_json::from_str::<ServerMessage>(&line)? {
-                ServerMessage::Joined(joined) => break Ok::<_, anyhow::Error>(joined),
-                ServerMessage::Error { message } => anyhow::bail!(message),
-                ServerMessage::Snapshot(_) => {}
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for join response")??;
 
     let (network_tx, network_rx) = mpsc::unbounded_channel::<ServerMessage>();
     tokio::spawn(async move {
@@ -246,11 +285,7 @@ async fn connect_session(player_name: &str) -> Result<(u8, Snapshot, Connection)
         }
     });
 
-    Ok((
-        joined.player_id,
-        joined.snapshot,
-        Connection { writer, network_rx },
-    ))
+    Ok(Connection { writer, network_rx })
 }
 
 async fn recv_server_message(connection: &mut Option<Connection>) -> Option<ServerMessage> {
@@ -259,7 +294,35 @@ async fn recv_server_message(connection: &mut Option<Connection>) -> Option<Serv
 }
 
 fn offline_snapshot() -> Snapshot {
-    GameState::new().snapshot()
+    Snapshot {
+        tick: 0,
+        world: World::empty(1, 1),
+        players: Vec::new(),
+        npcs: Vec::new(),
+        event_log: Vec::new(),
+        config: default_server_config(),
+    }
+}
+
+fn apply_patch_frame(app: &mut App, patch: PatchFrame) {
+    app.snapshot.tick = patch.tick;
+
+    for update in patch.tiles {
+        let _ = app.snapshot.world.set_tile(update.pos, update.tile);
+    }
+
+    if let Some(players) = patch.players {
+        app.snapshot.players = players;
+    }
+    if let Some(npcs) = patch.npcs {
+        app.snapshot.npcs = npcs;
+    }
+    if let Some(event_log) = patch.event_log {
+        app.snapshot.event_log = event_log;
+    }
+    if let Some(config) = patch.config {
+        app.snapshot.config = config;
+    }
 }
 
 async fn tokio_stream_event(events: &mut EventStream) -> Result<Option<Event>> {
@@ -307,6 +370,16 @@ async fn handle_event(
 
     if app.command_input.is_some() {
         return handle_command_input(key.code, app, writer).await;
+    }
+
+    if !app.is_ready() {
+        if matches!(key.code, KeyCode::Char('q')) {
+            return Ok(true);
+        }
+        if matches!(key.code, KeyCode::Char('?')) {
+            app.show_help = !app.show_help;
+        }
+        return Ok(false);
     }
 
     let direction = match key.code {
@@ -664,8 +737,8 @@ fn draw(frame: &mut Frame, app: &App) {
         draw_log(frame, vertical[2], app);
     }
 
-    if app.reconnecting {
-        draw_reconnect_modal(frame, centered_rect(46, 26, area), app);
+    if !app.is_ready() {
+        draw_sync_modal(frame, centered_rect(52, 28, area), app);
     }
 
     if app.show_params {
@@ -901,23 +974,62 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(modal, area);
 }
 
-fn draw_reconnect_modal(frame: &mut Frame, area: Rect, app: &App) {
-    let message = app
-        .last_error
-        .as_deref()
-        .unwrap_or("attempting to reconnect");
-
-    let lines = vec![
-        Line::from("Server disconnected"),
-        Line::from(""),
-        Line::from(message),
-        Line::from(""),
-        Line::from("Retrying automatically. Press q to quit."),
-    ];
+fn draw_sync_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let (title, lines) = match app.sync_state {
+        SyncState::Connecting => (
+            "Connecting",
+            vec![
+                Line::from("Connecting to server..."),
+                Line::from(""),
+                Line::from("Waiting for TCP session and join handshake."),
+                Line::from(""),
+                Line::from("Press q to quit."),
+            ],
+        ),
+        SyncState::Syncing {
+            received_rows,
+            total_rows,
+        } => {
+            let percent = if total_rows <= 0 {
+                0.0
+            } else {
+                (received_rows as f64 / total_rows as f64 * 100.0).clamp(0.0, 100.0)
+            };
+            (
+                "Syncing World",
+                vec![
+                    Line::from("Downloading world state..."),
+                    Line::from(""),
+                    Line::from(format!(
+                        "received rows: {received_rows}/{total_rows} ({percent:.0}%)"
+                    )),
+                    Line::from("Applying chunked full sync before live patches."),
+                    Line::from(""),
+                    Line::from("Press q to quit."),
+                ],
+            )
+        }
+        SyncState::Reconnecting => (
+            "Reconnecting",
+            vec![
+                Line::from("Server disconnected"),
+                Line::from(""),
+                Line::from(
+                    app.last_error
+                        .as_deref()
+                        .unwrap_or("attempting to reconnect"),
+                ),
+                Line::from("Retrying automatically once per second."),
+                Line::from(""),
+                Line::from("Press q to quit."),
+            ],
+        ),
+        SyncState::Ready => return,
+    };
 
     frame.render_widget(Clear, area);
     let modal = Paragraph::new(lines)
-        .block(Block::default().title("Reconnecting").borders(Borders::ALL))
+        .block(Block::default().title(title).borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     frame.render_widget(modal, area);
 }
