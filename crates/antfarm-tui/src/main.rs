@@ -41,6 +41,8 @@ struct App {
     pending_command: PendingCommand,
     command_input: Option<String>,
     command_feedback: Option<String>,
+    command_history: Vec<String>,
+    command_history_index: Option<usize>,
     last_error: Option<String>,
     action_animation: Option<ActionAnimation>,
     reconnecting: bool,
@@ -72,6 +74,8 @@ impl App {
             pending_command: PendingCommand::None,
             command_input: None,
             command_feedback: None,
+            command_history: Vec::new(),
+            command_history_index: None,
             last_error: None,
             action_animation: None,
             reconnecting: false,
@@ -99,6 +103,7 @@ impl App {
         self.pending_command = PendingCommand::None;
         self.command_input = None;
         self.command_feedback = None;
+        self.command_history_index = None;
         self.show_params = false;
         self.params_scroll = 0;
         self.action_animation = None;
@@ -342,6 +347,7 @@ async fn handle_event(
             app.pending_command = PendingCommand::None;
             app.command_input = None;
             app.command_feedback = None;
+            app.command_history_index = None;
             app.show_params = false;
             app.params_scroll = 0;
         }
@@ -350,6 +356,7 @@ async fn handle_event(
         KeyCode::Char('/') => {
             app.command_input = Some("/".to_string());
             app.command_feedback = command_suggestion("/");
+            app.command_history_index = None;
             app.pending_command = PendingCommand::None;
             app.last_error = None;
         }
@@ -398,8 +405,10 @@ async fn handle_command_input(
         KeyCode::Esc => {
             app.command_input = None;
             app.command_feedback = None;
+            app.command_history_index = None;
         }
         KeyCode::Backspace => {
+            app.command_history_index = None;
             input.pop();
             if input.is_empty() {
                 app.command_input = None;
@@ -410,13 +419,19 @@ async fn handle_command_input(
             let command = input.clone();
             app.command_input = None;
             app.command_feedback = None;
+            app.command_history_index = None;
             submit_command(command, app, writer).await?;
         }
         KeyCode::Tab => {
             autocomplete_command(input);
             app.command_feedback = command_suggestion(input);
         }
-        KeyCode::Char(ch) => input.push(ch),
+        KeyCode::Up => history_up(app),
+        KeyCode::Down => history_down(app),
+        KeyCode::Char(ch) => {
+            app.command_history_index = None;
+            input.push(ch);
+        }
         _ => {}
     }
 
@@ -433,6 +448,9 @@ async fn submit_command(
     writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
 ) -> Result<()> {
     let trimmed = command.trim();
+    if !trimmed.is_empty() {
+        push_command_history(app, trimmed);
+    }
     let mut parts = trimmed.splitn(4, ' ');
     let head = parts.next().unwrap_or_default();
     let verb = parts.next().unwrap_or_default();
@@ -488,6 +506,51 @@ async fn submit_command(
     Ok(())
 }
 
+fn push_command_history(app: &mut App, command: &str) {
+    if app.command_history.last().is_some_and(|last| last == command) {
+        return;
+    }
+    app.command_history.push(command.to_string());
+    if app.command_history.len() > 50 {
+        let extra = app.command_history.len() - 50;
+        app.command_history.drain(0..extra);
+    }
+}
+
+fn history_up(app: &mut App) {
+    if app.command_history.is_empty() {
+        return;
+    }
+
+    let next_index = match app.command_history_index {
+        None => app.command_history.len().saturating_sub(1),
+        Some(0) => 0,
+        Some(index) => index.saturating_sub(1),
+    };
+    app.command_history_index = Some(next_index);
+    if let Some(command) = app.command_history.get(next_index) {
+        app.command_input = Some(command.clone());
+    }
+}
+
+fn history_down(app: &mut App) {
+    let Some(index) = app.command_history_index else {
+        return;
+    };
+
+    if index + 1 >= app.command_history.len() {
+        app.command_history_index = None;
+        app.command_input = Some("/".to_string());
+        return;
+    }
+
+    let next_index = index + 1;
+    app.command_history_index = Some(next_index);
+    if let Some(command) = app.command_history.get(next_index) {
+        app.command_input = Some(command.clone());
+    }
+}
+
 fn parse_config_value(raw: &str) -> Result<Value> {
     if let Ok(value) = serde_json::from_str::<Value>(raw) {
         return Ok(value);
@@ -520,6 +583,7 @@ fn command_suggestion(input: &str) -> Option<String> {
         "/sc set world.gen_params.soil.dirt_depth 8",
         "/sc set world.gen_params.ore.cluster_max 18",
         "/sc set world.gen_params.food.max_depth 50",
+        "/sc set world.gen_params.stone_pockets.cluster_max 12",
         "/sc set world.snapshot_interval 5.0",
     ];
 
@@ -546,6 +610,7 @@ fn autocomplete_command(input: &mut String) {
         "/sc set world.gen_params.soil.dirt_depth 8",
         "/sc set world.gen_params.ore.cluster_max 18",
         "/sc set world.gen_params.food.max_depth 50",
+        "/sc set world.gen_params.stone_pockets.cluster_max 12",
         "/sc set world.snapshot_interval 5.0",
     ];
 
@@ -816,6 +881,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("/sc set world.gen_params.soil.dirt_depth 8"),
         Line::from("/sc set world.gen_params.ore.cluster_max 18"),
         Line::from("/sc set world.gen_params.food.max_depth 50"),
+        Line::from("/sc set world.gen_params.stone_pockets.cluster_max 12"),
         Line::from("/sc set world.snapshot_interval 5.0"),
         Line::from("/sc world_reset"),
         Line::from("/sc world_reset 42"),

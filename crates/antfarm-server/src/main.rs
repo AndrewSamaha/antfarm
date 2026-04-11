@@ -1,13 +1,17 @@
-use antfarm_core::{ClientMessage, GameState, JoinAck, ServerMessage, Snapshot, TICK_MILLIS};
+use antfarm_core::{
+    ClientMessage, GameState, JoinAck, ServerMessage, Snapshot, TICK_MILLIS,
+    default_server_config,
+};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -19,6 +23,7 @@ use tokio::{
 const SERVER_ADDR: &str = "127.0.0.1:7000";
 const SNAPSHOT_DB_PATH: &str = "data/antfarm.sqlite3";
 const SNAPSHOT_RETENTION: i64 = 10;
+const HEARTBEAT_INTERVAL_SECONDS: u64 = 30;
 
 type ClientTx = tokio::sync::mpsc::UnboundedSender<ServerMessage>;
 
@@ -36,8 +41,25 @@ enum PersistMessage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
+    emit_log(
+        "starting_server",
+        json!({
+            "addr": SERVER_ADDR,
+            "snapshot_db": snapshot_path.display().to_string(),
+        }),
+    );
     let persistence_tx = spawn_persistence_worker(snapshot_path.clone())?;
-    let initial_game = load_startup_game(&snapshot_path)?;
+    let (initial_game, restored) = load_startup_game(&snapshot_path)?;
+
+    emit_log(
+        "server_start",
+        json!({
+            "addr": SERVER_ADDR,
+            "snapshot_db": snapshot_path.display().to_string(),
+            "restored_snapshot": restored,
+            "world": world_log_fields(&initial_game),
+        }),
+    );
 
     let listener = TcpListener::bind(SERVER_ADDR).await?;
     let state = ServerState {
@@ -77,14 +99,36 @@ async fn main() -> Result<()> {
         });
     }
 
-    println!("antfarm-server listening on {SERVER_ADDR}");
+    {
+        let heartbeat_state = state.clone();
+        tokio::spawn(async move {
+            let mut heartbeat = time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS));
+            loop {
+                heartbeat.tick().await;
+                let (tick, players, npcs) = {
+                    let game = heartbeat_state.game.lock().await;
+                    (game.tick, game.players.len(), game.npcs.len())
+                };
+                emit_log(
+                    "heartbeat",
+                    json!({
+                        "tick": tick,
+                        "connected_players": players,
+                        "npc_count": npcs,
+                    }),
+                );
+            }
+        });
+    }
+
+    emit_log("server_listening", json!({ "addr": SERVER_ADDR }));
 
     loop {
         let (stream, _) = listener.accept().await?;
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_client(stream, state).await {
-                eprintln!("client disconnected with error: {error}");
+                emit_log("client_session_error", json!({ "error": error.to_string() }));
             }
         });
     }
@@ -123,6 +167,14 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     Ok((id, snapshot)) => {
                         state.clients.lock().await.insert(id, tx.clone());
                         player_id = Some(id);
+                        emit_log(
+                            "player_join",
+                            json!({
+                                "player_id": id,
+                                "name": snapshot.players.iter().find(|player| player.id == id).map(|player| player.name.clone()),
+                                "connected_players": snapshot.players.len(),
+                            }),
+                        );
                         tx.send(ServerMessage::Joined(JoinAck {
                             player_id: id,
                             snapshot,
@@ -156,6 +208,7 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     continue;
                 };
 
+                let logged_value = value.clone();
                 let result = {
                     let mut game = state.game.lock().await;
                     game.set_config_value(&path, value)
@@ -165,6 +218,14 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     tx.send(ServerMessage::Error { message })?;
                     continue;
                 }
+
+                emit_log(
+                    "sc_set",
+                    json!({
+                        "path": path,
+                        "value": logged_value,
+                    }),
+                );
 
                 {
                     let game = state.game.lock().await;
@@ -176,6 +237,13 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                 {
                     let mut game = state.game.lock().await;
                     game.world_reset(seed);
+                    emit_log(
+                        "world_reset",
+                        json!({
+                            "seed_override": seed,
+                            "world": world_log_fields(&game),
+                        }),
+                    );
                     let _ = state.persistence_tx.send(PersistMessage::Save(game.snapshot()));
                 }
                 broadcast_snapshot(&state).await?;
@@ -187,7 +255,16 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
         state.clients.lock().await.remove(&id);
         {
             let mut game = state.game.lock().await;
+            let player_name = game.players.get(&id).map(|player| player.name.clone());
             game.remove_player(id);
+            emit_log(
+                "player_leave",
+                json!({
+                    "player_id": id,
+                    "name": player_name,
+                    "connected_players": game.players.len(),
+                }),
+            );
         }
         broadcast_snapshot(&state).await?;
     }
@@ -209,11 +286,23 @@ async fn broadcast_snapshot(state: &ServerState) -> Result<()> {
     Ok(())
 }
 
-fn load_startup_game(path: &Path) -> Result<GameState> {
+fn load_startup_game(path: &Path) -> Result<(GameState, bool)> {
     if let Some(snapshot) = load_latest_snapshot(path)? {
-        Ok(GameState::from_snapshot(snapshot))
+        Ok((GameState::from_snapshot(snapshot), true))
     } else {
-        Ok(GameState::new())
+        let config = default_server_config();
+        emit_log(
+            "generating_world",
+            json!({
+                "source": "startup",
+                "world": {
+                    "seed": config.pointer("/world/seed").and_then(Value::as_u64),
+                    "max_depth": config.pointer("/world/max_depth").and_then(Value::as_i64),
+                    "gen_params": config.pointer("/world/gen_params").cloned(),
+                }
+            }),
+        );
+        Ok((GameState::from_config(config), false))
     }
 }
 
@@ -238,6 +327,13 @@ fn persistence_worker_loop(path: PathBuf, rx: mpsc::Receiver<PersistMessage>) ->
             PersistMessage::Save(snapshot) => {
                 save_snapshot(&connection, &snapshot)?;
                 prune_snapshots(&connection)?;
+                emit_log(
+                    "snapshot_saved",
+                    json!({
+                        "tick": snapshot.tick,
+                        "retention": SNAPSHOT_RETENTION,
+                    }),
+                );
             }
         }
     }
@@ -303,4 +399,31 @@ fn prune_snapshots(connection: &Connection) -> Result<()> {
         params![SNAPSHOT_RETENTION],
     )?;
     Ok(())
+}
+
+fn emit_log(event: &str, fields: Value) {
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let mut object = serde_json::Map::new();
+    object.insert("ts_ms".to_string(), Value::from(ts_ms));
+    object.insert("event".to_string(), Value::from(event));
+    if let Value::Object(extra) = fields {
+        for (key, value) in extra {
+            object.insert(key, value);
+        }
+    }
+    println!("{}", Value::Object(object));
+}
+
+fn world_log_fields(game: &GameState) -> Value {
+    json!({
+        "tick": game.tick,
+        "width": game.world.width(),
+        "height": game.world.height(),
+        "seed": game.config.pointer("/world/seed").and_then(Value::as_u64),
+        "max_depth": game.config.pointer("/world/max_depth").and_then(Value::as_i64),
+        "gen_params": game.config.pointer("/world/gen_params").cloned(),
+    })
 }

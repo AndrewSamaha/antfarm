@@ -110,7 +110,7 @@ impl World {
 
         let terrain_variation =
             config_i32(config, "world.gen_params.soil.surface_variation", 4).max(0);
-        let dirt_depth = config_i32(config, "world.gen_params.soil.dirt_depth", 8).max(1);
+        let dirt_depth = config_i32(config, "world.gen_params.soil.dirt_depth", 150).max(1);
         let dirt_variation = config_i32(config, "world.gen_params.soil.dirt_variation", 3).max(0);
         let chunk_width = config_i32(config, "world.gen_params.chunk_width", 16).clamp(4, 64);
 
@@ -162,6 +162,25 @@ impl World {
                 max_depth.abs() - 8,
             ),
             &[Tile::Stone],
+            &surface_heights,
+        );
+
+        apply_depth_scaled_cluster_pass(
+            &mut world,
+            seed ^ 0x57_0A_E0,
+            chunk_width,
+            Tile::Stone,
+            &DepthScaledDepositConfig::from_config(
+                config,
+                "world.gen_params.stone_pockets",
+                1.0,
+                4,
+                12,
+                6,
+                max_depth.abs() - 20,
+                1.8,
+            ),
+            &[Tile::Dirt],
             &surface_heights,
         );
 
@@ -287,7 +306,7 @@ pub struct GameState {
 
 impl GameState {
     pub fn new() -> Self {
-        Self::from_config(default_config())
+        Self::from_config(default_server_config())
     }
 
     pub fn from_config(config: Value) -> Self {
@@ -719,6 +738,10 @@ impl GameState {
     }
 }
 
+pub fn default_server_config() -> Value {
+    default_config()
+}
+
 #[derive(Debug, Clone)]
 struct DepositConfig {
     attempts_per_chunk: i32,
@@ -753,6 +776,43 @@ impl DepositConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DepthScaledDepositConfig {
+    attempts_per_chunk: f64,
+    cluster_min: i32,
+    cluster_max: i32,
+    min_depth: i32,
+    max_depth: i32,
+    depth_gain: f64,
+}
+
+impl DepthScaledDepositConfig {
+    fn from_config(
+        config: &Value,
+        path: &str,
+        attempts_per_chunk: f64,
+        cluster_min: i32,
+        cluster_max: i32,
+        min_depth: i32,
+        max_depth: i32,
+        depth_gain: f64,
+    ) -> Self {
+        Self {
+            attempts_per_chunk: config_f64(
+                config,
+                &format!("{path}.attempts_per_chunk"),
+                attempts_per_chunk,
+            )
+            .max(0.0),
+            cluster_min: config_i32(config, &format!("{path}.cluster_min"), cluster_min).max(1),
+            cluster_max: config_i32(config, &format!("{path}.cluster_max"), cluster_max).max(1),
+            min_depth: config_i32(config, &format!("{path}.min_depth"), min_depth).max(0),
+            max_depth: config_i32(config, &format!("{path}.max_depth"), max_depth).max(0),
+            depth_gain: config_f64(config, &format!("{path}.depth_gain"), depth_gain).max(0.1),
+        }
+    }
+}
+
 fn default_config() -> Value {
     json!({
         "soil": {
@@ -766,7 +826,7 @@ fn default_config() -> Value {
                 "chunk_width": 16,
                 "soil": {
                     "surface_variation": 4,
-                    "dirt_depth": 8,
+                    "dirt_depth": 150,
                     "dirt_variation": 3
                 },
                 "ore": {
@@ -782,6 +842,14 @@ fn default_config() -> Value {
                     "cluster_max": 14,
                     "min_depth": 0,
                     "max_depth": 50
+                },
+                "stone_pockets": {
+                    "attempts_per_chunk": 60.0,
+                    "cluster_min": 1,
+                    "cluster_max": 60,
+                    "min_depth": 0,
+                    "max_depth": 235,
+                    "depth_gain": 0.00002
                 }
             }
         }
@@ -891,6 +959,73 @@ fn apply_cluster_pass(
             let cluster_max = deposit.cluster_max.max(deposit.cluster_min);
             let target_size = rng.random_range(deposit.cluster_min..=cluster_max);
             grow_cluster(world, &mut rng, center, target_size, tile, replaceable, min_y, max_y);
+        }
+    }
+}
+
+fn apply_depth_scaled_cluster_pass(
+    world: &mut World,
+    seed: u64,
+    chunk_width: i32,
+    tile: Tile,
+    deposit: &DepthScaledDepositConfig,
+    replaceable: &[Tile],
+    surface_heights: &[i32],
+) {
+    if deposit.attempts_per_chunk <= 0.0 || deposit.max_depth < deposit.min_depth {
+        return;
+    }
+
+    let chunks = (world.width() + chunk_width - 1) / chunk_width;
+    for chunk_x in 0..chunks {
+        let chunk_seed = seed ^ mix_u64(chunk_x as u64);
+        let mut rng = StdRng::seed_from_u64(chunk_seed);
+        let chunk_start = chunk_x * chunk_width;
+        let chunk_end = (chunk_start + chunk_width).min(world.width());
+
+        let mut attempts = deposit.attempts_per_chunk.floor() as i32;
+        let fractional = deposit.attempts_per_chunk.fract();
+        if rng.random::<f64>() < fractional {
+            attempts += 1;
+        }
+
+        for _ in 0..attempts.max(1) {
+            let center_x = rng.random_range(chunk_start..chunk_end);
+            let surface_y = surface_heights[center_x as usize];
+            let min_y = (surface_y + deposit.min_depth).clamp(0, world.height() - 2);
+            let max_y = (surface_y + deposit.max_depth).clamp(0, world.height() - 2);
+            if min_y > max_y {
+                continue;
+            }
+
+            let center_y = rng.random_range(min_y..=max_y);
+            let depth = center_y - surface_y;
+            let depth_span = (deposit.max_depth - deposit.min_depth).max(1);
+            let depth_factor = ((depth - deposit.min_depth).max(0) as f64 / f64::from(depth_span))
+                .clamp(0.0, 1.0)
+                .powf(deposit.depth_gain);
+
+            if rng.random::<f64>() > depth_factor {
+                continue;
+            }
+
+            let cluster_max = deposit.cluster_max.max(deposit.cluster_min);
+            let scaled_max = deposit.cluster_min
+                + ((cluster_max - deposit.cluster_min) as f64 * depth_factor).round() as i32;
+            let target_size = rng.random_range(deposit.cluster_min..=scaled_max.max(deposit.cluster_min));
+            grow_cluster(
+                world,
+                &mut rng,
+                Position {
+                    x: center_x,
+                    y: center_y,
+                },
+                target_size,
+                tile,
+                replaceable,
+                min_y,
+                max_y,
+            );
         }
     }
 }
