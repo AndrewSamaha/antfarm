@@ -35,6 +35,7 @@ struct App {
     player_id: u8,
     snapshot: Snapshot,
     show_help: bool,
+    show_events: bool,
     pending_command: PendingCommand,
     command_input: Option<String>,
     last_error: Option<String>,
@@ -62,6 +63,7 @@ impl App {
             player_id,
             snapshot,
             show_help: true,
+            show_events: false,
             pending_command: PendingCommand::None,
             command_input: None,
             last_error: None,
@@ -303,6 +305,7 @@ async fn handle_event(
             app.command_input = None;
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
+        KeyCode::Char('e') => app.show_events = !app.show_events,
         KeyCode::Char('/') => {
             app.command_input = Some("/".to_string());
             app.pending_command = PendingCommand::None;
@@ -440,18 +443,25 @@ fn default_action(app: &App, dir: MoveDir) -> Action {
 
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let constraints = if app.show_events {
+        vec![
             Constraint::Length(4),
             Constraint::Min(8),
             Constraint::Length(7),
-        ])
+        ]
+    } else {
+        vec![Constraint::Length(4), Constraint::Min(8)]
+    };
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     draw_status(frame, vertical[0], app);
     draw_world(frame, vertical[1], app);
-    draw_log(frame, vertical[2], app);
+    if app.show_events {
+        draw_log(frame, vertical[2], app);
+    }
 
     if app.reconnecting {
         draw_reconnect_modal(frame, centered_rect(46, 26, area), app);
@@ -644,6 +654,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("p d h/j/k/l: place dirt"),
         Line::from("p s h/j/k/l: place stone"),
         Line::from("/sc set soil.settle_frequency 0.01"),
+        Line::from("e: toggle event pane"),
         Line::from("? : toggle help"),
         Line::from("Esc: cancel place command or slash command"),
         Line::from("q: quit"),
