@@ -1,6 +1,6 @@
 use antfarm_core::{
-    Action, ClientMessage, MoveDir, PlaceMaterial, Player, Position, SURFACE_Y, ServerMessage,
-    Snapshot, Tile, Viewport,
+    Action, ClientMessage, GameState, MoveDir, PlaceMaterial, Player, Position, SURFACE_Y,
+    ServerMessage, Snapshot, Tile, Viewport,
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -24,11 +24,14 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::mpsc,
-    time,
+    time::{self, timeout},
 };
+
+const RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(900);
 
 #[derive(Debug)]
 struct App {
+    player_name: String,
     player_id: u8,
     snapshot: Snapshot,
     show_help: bool,
@@ -36,6 +39,7 @@ struct App {
     command_input: Option<String>,
     last_error: Option<String>,
     action_animation: Option<ActionAnimation>,
+    reconnecting: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,8 +56,9 @@ struct ActionAnimation {
 }
 
 impl App {
-    fn new(player_id: u8, snapshot: Snapshot) -> Self {
+    fn new(player_name: String, player_id: u8, snapshot: Snapshot) -> Self {
         Self {
+            player_name,
             player_id,
             snapshot,
             show_help: true,
@@ -61,6 +66,7 @@ impl App {
             command_input: None,
             last_error: None,
             action_animation: None,
+            reconnecting: false,
         }
     }
 
@@ -79,6 +85,26 @@ impl App {
             self.action_animation = None;
         }
     }
+
+    fn enter_reconnecting(&mut self, message: String) {
+        self.reconnecting = true;
+        self.pending_command = PendingCommand::None;
+        self.command_input = None;
+        self.action_animation = None;
+        self.last_error = Some(message);
+    }
+
+    fn restore_connection(&mut self, player_id: u8, snapshot: Snapshot) {
+        self.player_id = player_id;
+        self.snapshot = snapshot;
+        self.reconnecting = false;
+        self.last_error = None;
+    }
+}
+
+struct Connection {
+    writer: tokio::net::tcp::OwnedWriteHalf,
+    network_rx: mpsc::UnboundedReceiver<ServerMessage>,
 }
 
 #[tokio::main]
@@ -86,56 +112,11 @@ async fn main() -> Result<()> {
     let name = env::args()
         .nth(1)
         .unwrap_or_else(|| "worker-ant".to_string());
-    let stream = TcpStream::connect("127.0.0.1:7000")
-        .await
-        .context("connect to antfarm-server on 127.0.0.1:7000")?;
-
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-
-    let join = serde_json::to_string(&ClientMessage::Join { name })?;
-    writer.write_all(join.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-
-    let joined = loop {
-        let Some(line) = lines.next_line().await? else {
-            anyhow::bail!("server closed before join completed");
-        };
-        match serde_json::from_str::<ServerMessage>(&line)? {
-            ServerMessage::Joined(joined) => break joined,
-            ServerMessage::Error { message } => anyhow::bail!(message),
-            ServerMessage::Snapshot(_) => {}
-        }
-    };
-
-    let (network_tx, mut network_rx) = mpsc::unbounded_channel::<ServerMessage>();
-    tokio::spawn(async move {
-        while let Ok(Some(line)) = lines.next_line().await {
-            match serde_json::from_str::<ServerMessage>(&line) {
-                Ok(message) => {
-                    let _ = network_tx.send(message);
-                }
-                Err(error) => {
-                    let _ = network_tx.send(ServerMessage::Error {
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-    });
-
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let terminal = ratatui::init();
 
-    let result = run_app(
-        terminal,
-        &mut writer,
-        joined.player_id,
-        joined.snapshot,
-        &mut network_rx,
-    )
-    .await;
+    let result = run_app(terminal, name).await;
 
     ratatui::restore();
     disable_raw_mode()?;
@@ -144,32 +125,45 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn run_app(
-    mut terminal: DefaultTerminal,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    player_id: u8,
-    snapshot: Snapshot,
-    network_rx: &mut mpsc::UnboundedReceiver<ServerMessage>,
-) -> Result<()> {
-    let mut app = App::new(player_id, snapshot);
+async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {
+    let mut app = App::new(player_name.clone(), 0, offline_snapshot());
+    app.enter_reconnecting("attempting to reconnect".to_string());
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
+    let mut reconnect = time::interval(Duration::from_millis(1000));
+    reconnect.tick().await;
+    let mut connection: Option<Connection> = None;
 
     loop {
         terminal.draw(|frame| draw(frame, &app))?;
 
         tokio::select! {
             _ = redraw.tick() => app.tick_animation(),
-            maybe_message = network_rx.recv() => {
+            _ = reconnect.tick(), if connection.is_none() => {
+                match timeout(RECONNECT_ATTEMPT_TIMEOUT, connect_session(&app.player_name)).await {
+                    Ok(Ok((player_id, snapshot, new_connection))) => {
+                        app.restore_connection(player_id, snapshot);
+                        connection = Some(new_connection);
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        app.enter_reconnecting("attempting to reconnect".to_string());
+                    }
+                }
+            }
+            maybe_message = recv_server_message(&mut connection), if connection.is_some() => {
                 match maybe_message {
                     Some(ServerMessage::Snapshot(snapshot)) => app.snapshot = snapshot,
                     Some(ServerMessage::Error { message }) => app.last_error = Some(message),
                     Some(ServerMessage::Joined(_)) => {}
-                    None => anyhow::bail!("lost connection to server"),
+                    None => {
+                        connection = None;
+                        app.enter_reconnecting("attempting to reconnect".to_string());
+                    }
                 }
             }
             maybe_event = tokio_stream_event(&mut events) => {
                 if let Some(event) = maybe_event? {
+                    let writer = connection.as_mut().map(|connection| &mut connection.writer);
                     if handle_event(event, &mut app, writer).await? {
                         break;
                     }
@@ -181,6 +175,72 @@ async fn run_app(
     Ok(())
 }
 
+async fn connect_session(player_name: &str) -> Result<(u8, Snapshot, Connection)> {
+    let stream = timeout(
+        RECONNECT_ATTEMPT_TIMEOUT,
+        TcpStream::connect("127.0.0.1:7000"),
+    )
+    .await
+    .context("timed out connecting to antfarm-server")?
+    .context("connect to antfarm-server on 127.0.0.1:7000")?;
+
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let join = serde_json::to_string(&ClientMessage::Join {
+        name: player_name.to_string(),
+    })?;
+    writer.write_all(join.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+
+    let joined = timeout(RECONNECT_ATTEMPT_TIMEOUT, async {
+        loop {
+            let Some(line) = lines.next_line().await? else {
+                anyhow::bail!("server closed before join completed");
+            };
+            match serde_json::from_str::<ServerMessage>(&line)? {
+                ServerMessage::Joined(joined) => break Ok::<_, anyhow::Error>(joined),
+                ServerMessage::Error { message } => anyhow::bail!(message),
+                ServerMessage::Snapshot(_) => {}
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for join response")??;
+
+    let (network_tx, network_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            match serde_json::from_str::<ServerMessage>(&line) {
+                Ok(message) => {
+                    let _ = network_tx.send(message);
+                }
+                Err(error) => {
+                    let _ = network_tx.send(ServerMessage::Error {
+                        message: error.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok((
+        joined.player_id,
+        joined.snapshot,
+        Connection { writer, network_rx },
+    ))
+}
+
+async fn recv_server_message(connection: &mut Option<Connection>) -> Option<ServerMessage> {
+    let connection = connection.as_mut()?;
+    connection.network_rx.recv().await
+}
+
+fn offline_snapshot() -> Snapshot {
+    GameState::new().snapshot()
+}
+
 async fn tokio_stream_event(events: &mut EventStream) -> Result<Option<Event>> {
     use futures_util::StreamExt;
 
@@ -190,7 +250,7 @@ async fn tokio_stream_event(events: &mut EventStream) -> Result<Option<Event>> {
 async fn handle_event(
     event: Event,
     app: &mut App,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
 ) -> Result<bool> {
     let Event::Key(key) = event else {
         return Ok(false);
@@ -230,7 +290,9 @@ async fn handle_event(
                 until: Instant::now() + Duration::from_millis(110),
             });
         }
-        send_action(writer, action).await?;
+        if let Some(writer) = writer {
+            send_action(writer, action).await?;
+        }
         return Ok(false);
     }
 
@@ -281,7 +343,7 @@ async fn send_message(
 async fn handle_command_input(
     code: KeyCode,
     app: &mut App,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
 ) -> Result<bool> {
     let Some(input) = app.command_input.as_mut() else {
         return Ok(false);
@@ -310,7 +372,7 @@ async fn handle_command_input(
 async fn submit_command(
     command: String,
     app: &mut App,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
 ) -> Result<()> {
     let trimmed = command.trim();
     let mut parts = trimmed.splitn(4, ' ');
@@ -325,6 +387,10 @@ async fn submit_command(
     }
 
     let value = parse_config_value(raw_value)?;
+    let Some(writer) = writer else {
+        app.last_error = Some("server unavailable while reconnecting".to_string());
+        return Ok(());
+    };
     send_message(
         writer,
         ClientMessage::ConfigSet {
@@ -386,6 +452,10 @@ fn draw(frame: &mut Frame, app: &App) {
     draw_status(frame, vertical[0], app);
     draw_world(frame, vertical[1], app);
     draw_log(frame, vertical[2], app);
+
+    if app.reconnecting {
+        draw_reconnect_modal(frame, centered_rect(46, 26, area), app);
+    }
 
     if app.show_help {
         draw_help_modal(frame, centered_rect(60, 55, area), app);
@@ -584,6 +654,27 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, area);
     let modal = Paragraph::new(lines)
         .block(Block::default().title("Controls").borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(modal, area);
+}
+
+fn draw_reconnect_modal(frame: &mut Frame, area: Rect, app: &App) {
+    let message = app
+        .last_error
+        .as_deref()
+        .unwrap_or("attempting to reconnect");
+
+    let lines = vec![
+        Line::from("Server disconnected"),
+        Line::from(""),
+        Line::from(message),
+        Line::from(""),
+        Line::from("Retrying automatically. Press q to quit."),
+    ];
+
+    frame.render_widget(Clear, area);
+    let modal = Paragraph::new(lines)
+        .block(Block::default().title("Reconnecting").borders(Borders::ALL))
         .wrap(Wrap { trim: true });
     frame.render_widget(modal, area);
 }
