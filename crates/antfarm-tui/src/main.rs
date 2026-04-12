@@ -2,6 +2,7 @@ mod app;
 mod client_files;
 mod commands;
 mod input;
+mod modals;
 mod network;
 mod render;
 
