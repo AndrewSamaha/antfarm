@@ -1,0 +1,226 @@
+mod player_actions;
+mod simulation;
+
+use rand::{SeedableRng, rngs::StdRng};
+use serde_json::Value;
+use std::collections::HashMap;
+
+use crate::{
+    config::{
+        config_f64, config_u64, default_server_config, merge_with_default_config, set_config_path,
+    },
+    constants::{
+        DEFAULT_WORLD_SEED, DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, WORLD_WIDTH,
+    },
+    inventory::default_inventory,
+    npc::default_npcs,
+    protocol::{DigProgress, PatchFrame, Snapshot, TileUpdate},
+    types::{Facing, NpcAnt, Player, Position, Tile},
+    world::World,
+};
+
+#[derive(Debug, Clone)]
+pub struct GameState {
+    pub tick: u64,
+    pub world: World,
+    pub players: HashMap<u8, Player>,
+    pub npcs: Vec<NpcAnt>,
+    pub event_log: Vec<String>,
+    pub config: Value,
+    dig_progress: HashMap<u8, DigProgress>,
+    dirty_tiles: HashMap<Position, Tile>,
+    players_dirty: bool,
+    npcs_dirty: bool,
+    event_log_dirty: bool,
+    config_dirty: bool,
+    rng: StdRng,
+    next_player_id: u8,
+}
+
+impl GameState {
+    pub fn new() -> Self {
+        Self::from_config(default_server_config())
+    }
+
+    pub fn from_config(config: Value) -> Self {
+        let config = merge_with_default_config(config);
+        let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
+        let world = World::generate(seed, WORLD_WIDTH, &config);
+
+        Self {
+            tick: 0,
+            npcs: default_npcs(&world),
+            world,
+            players: HashMap::new(),
+            event_log: vec!["Server booted ant colony".to_string()],
+            config,
+            dig_progress: HashMap::new(),
+            dirty_tiles: HashMap::new(),
+            players_dirty: true,
+            npcs_dirty: true,
+            event_log_dirty: true,
+            config_dirty: true,
+            rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
+            next_player_id: 1,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        let config = merge_with_default_config(snapshot.config);
+        let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
+        Self {
+            tick: snapshot.tick,
+            world: snapshot.world,
+            players: HashMap::new(),
+            npcs: snapshot.npcs,
+            event_log: vec!["Server restored world snapshot".to_string()],
+            config,
+            dig_progress: HashMap::new(),
+            dirty_tiles: HashMap::new(),
+            players_dirty: true,
+            npcs_dirty: true,
+            event_log_dirty: true,
+            config_dirty: true,
+            rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
+            next_player_id: 1,
+        }
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        let mut players: Vec<_> = self.players.values().cloned().collect();
+        players.sort_by_key(|player| player.id);
+        Snapshot {
+            tick: self.tick,
+            world: self.world.clone(),
+            players,
+            npcs: self.npcs.clone(),
+            event_log: self.event_log.clone(),
+            config: self.config.clone(),
+        }
+    }
+
+    pub fn set_config_value(&mut self, path: &str, value: Value) -> Result<(), String> {
+        if path.trim().is_empty() {
+            return Err("config path cannot be empty".to_string());
+        }
+
+        set_config_path(&mut self.config, path, value)?;
+        self.config = merge_with_default_config(self.config.clone());
+        self.config_dirty = true;
+        self.push_event(format!("Config updated: {path}"));
+        Ok(())
+    }
+
+    pub fn world_reset(&mut self, seed: Option<u64>) {
+        let config = self.config.clone();
+        let existing_players: Vec<(u8, String)> = self
+            .players
+            .iter()
+            .map(|(id, player)| (*id, player.name.clone()))
+            .collect();
+        let next_player_id = self.next_player_id;
+        let mut config = config;
+        if let Some(seed) = seed {
+            let _ = set_config_path(&mut config, "world.seed", Value::from(seed));
+        }
+        *self = Self::from_config(config);
+        self.next_player_id = next_player_id;
+
+        for (index, (id, name)) in existing_players.into_iter().enumerate() {
+            let spawn_x = (8 + index as i32 * 6).min(self.world.width() - 2);
+            self.players.insert(
+                id,
+                Player {
+                    id,
+                    name,
+                    pos: Position {
+                        x: spawn_x,
+                        y: self.world.spawn_y_for_column(spawn_x),
+                    },
+                    facing: Facing::Right,
+                    inventory: default_inventory(),
+                },
+            );
+        }
+
+        self.players_dirty = true;
+        self.push_event("World reset by server command".to_string());
+        if !self.players.is_empty() {
+            self.push_event(format!("Respawned {} connected ants", self.players.len()));
+        }
+    }
+
+    pub fn snapshot_interval_seconds(&self) -> f64 {
+        config_f64(
+            &self.config,
+            "world.snapshot_interval",
+            DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS,
+        )
+        .max(0.5)
+    }
+
+    pub fn take_patch(&mut self) -> Option<PatchFrame> {
+        if self.dirty_tiles.is_empty()
+            && !self.players_dirty
+            && !self.npcs_dirty
+            && !self.event_log_dirty
+            && !self.config_dirty
+        {
+            return None;
+        }
+
+        let mut tiles: Vec<_> = self
+            .dirty_tiles
+            .drain()
+            .map(|(pos, tile)| TileUpdate { pos, tile })
+            .collect();
+        tiles.sort_by_key(|update| (update.pos.y, update.pos.x));
+
+        let players = self.players_dirty.then(|| {
+            let mut players: Vec<_> = self.players.values().cloned().collect();
+            players.sort_by_key(|player| player.id);
+            players
+        });
+
+        let npcs = self.npcs_dirty.then(|| self.npcs.clone());
+        let event_log = self.event_log_dirty.then(|| self.event_log.clone());
+        let config = self.config_dirty.then(|| self.config.clone());
+
+        self.players_dirty = false;
+        self.npcs_dirty = false;
+        self.event_log_dirty = false;
+        self.config_dirty = false;
+
+        Some(PatchFrame {
+            tick: self.tick,
+            tiles,
+            players,
+            npcs,
+            event_log,
+            config,
+        })
+    }
+
+    fn occupied_by_actor(&self, pos: Position) -> bool {
+        self.players.values().any(|player| player.pos == pos)
+            || self.npcs.iter().any(|npc| npc.pos == pos)
+    }
+
+    fn push_event(&mut self, event: String) {
+        self.event_log.push(event);
+        if self.event_log.len() > 8 {
+            let extra = self.event_log.len() - 8;
+            self.event_log.drain(0..extra);
+        }
+        self.event_log_dirty = true;
+    }
+
+    fn set_world_tile(&mut self, pos: Position, tile: Tile) {
+        if self.world.tile(pos) == Some(tile) {
+            return;
+        }
+        if self.world.set_tile(pos, tile) {
+            self.dirty_tiles.insert(pos, tile);
+        }
+    }
+}

@@ -1,12 +1,8 @@
-use crate::{
-    app::App,
-    client_files::{
-        load_or_create_client_config, save_client_config, save_command_history,
-    },
-    network::send_message,
-};
+mod local;
+mod server;
+
+use crate::app::App;
 use anyhow::Result;
-use antfarm_core::ClientMessage;
 use crossterm::event::KeyCode;
 use serde_json::Value;
 
@@ -60,117 +56,6 @@ pub(crate) async fn handle_command_input(
     Ok(false)
 }
 
-pub(crate) async fn submit_command(
-    command: String,
-    app: &mut App,
-    writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
-) -> Result<()> {
-    let trimmed = command.trim();
-    if !trimmed.is_empty() && push_command_history(app, trimmed) {
-        save_command_history(&app.player_name, &app.command_history, app.max_history)?;
-    }
-    let mut parts = trimmed.splitn(4, ' ');
-    let head = parts.next().unwrap_or_default();
-    let verb = parts.next().unwrap_or_default();
-    let path = parts.next().unwrap_or_default();
-    let raw_value = parts.next().unwrap_or_default();
-
-    if trimmed == "/help" {
-        app.show_help = true;
-        app.clear_status();
-        return Ok(());
-    }
-
-    if head == "/cc" && verb == "set" && !path.is_empty() && !raw_value.is_empty() {
-        let mut client_config = load_or_create_client_config(&app.player_name)?;
-        match path {
-            "show_help_at_startup" => {
-                let show_help_at_startup = match raw_value {
-                    "true" => true,
-                    "false" => false,
-                    _ => {
-                        app.set_error("expected: /cc set show_help_at_startup true|false");
-                        return Ok(());
-                    }
-                };
-                client_config.show_help_at_startup = show_help_at_startup;
-                save_client_config(&app.player_name, &client_config)?;
-                app.set_info(format!(
-                    "client config updated: show_help_at_startup={show_help_at_startup}"
-                ));
-                return Ok(());
-            }
-            "max_history" => {
-                let max_history = raw_value
-                    .parse::<usize>()
-                    .map_err(|_| anyhow::anyhow!("max_history must be a positive integer"))?;
-                if max_history == 0 {
-                    app.set_error("max_history must be at least 1");
-                    return Ok(());
-                }
-                client_config.max_history = max_history;
-                save_client_config(&app.player_name, &client_config)?;
-                app.max_history = max_history;
-                if app.command_history.len() > app.max_history {
-                    let extra = app.command_history.len() - app.max_history;
-                    app.command_history.drain(0..extra);
-                }
-                save_command_history(&app.player_name, &app.command_history, app.max_history)?;
-                app.set_info(format!("client config updated: max_history={max_history}"));
-                return Ok(());
-            }
-            _ => {
-                app.set_error(
-                    "expected: /cc set show_help_at_startup true|false or /cc set max_history <n>",
-                );
-                return Ok(());
-            }
-        }
-    }
-
-    if trimmed == "/sc show_params" {
-        app.open_params();
-        app.clear_status();
-        return Ok(());
-    }
-
-    let Some(writer) = writer else {
-        app.set_error("server unavailable while reconnecting");
-        return Ok(());
-    };
-
-    if head == "/sc" && verb == "world_reset" {
-        let seed = if path.is_empty() {
-            None
-        } else {
-            Some(
-                path.parse::<u64>()
-                    .map_err(|_| anyhow::anyhow!("world_reset seed must be an unsigned integer"))?,
-            )
-        };
-        send_message(writer, ClientMessage::WorldReset { seed }).await?;
-        app.clear_status();
-        return Ok(());
-    }
-
-    if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], or /sc set <path> <value>");
-        return Ok(());
-    }
-
-    let value = parse_config_value(raw_value)?;
-    send_message(
-        writer,
-        ClientMessage::ConfigSet {
-            path: path.to_string(),
-            value,
-        },
-    )
-    .await?;
-    app.clear_status();
-    Ok(())
-}
-
 pub(crate) fn command_suggestion(input: &str) -> Option<String> {
     let trimmed = input.trim_start();
     if !trimmed.starts_with('/') {
@@ -220,6 +105,35 @@ pub(crate) fn parse_config_value(raw: &str) -> Result<Value> {
         "null" => Ok(Value::Null),
         _ => Ok(Value::from(raw)),
     }
+}
+
+async fn submit_command(
+    command: String,
+    app: &mut App,
+    writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
+) -> Result<()> {
+    let trimmed = command.trim();
+    if !trimmed.is_empty() && push_command_history(app, trimmed) {
+        crate::client_files::save_command_history(&app.player_name, &app.command_history, app.max_history)?;
+    }
+
+    if trimmed == "/help" {
+        app.show_help = true;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if trimmed.starts_with("/cc ") {
+        return local::submit_local_command(trimmed, app).await;
+    }
+
+    if trimmed == "/sc show_params" {
+        app.open_params();
+        app.clear_status();
+        return Ok(());
+    }
+
+    server::submit_server_command(trimmed, app, writer).await
 }
 
 fn autocomplete_command(input: &mut String) {
