@@ -1,0 +1,9 @@
+pub const MAX_PLAYERS: usize = 5;
+pub const WORLD_WIDTH: i32 = 160;
+pub const SURFACE_Y: i32 = 18;
+pub const TICK_MILLIS: u64 = 120;
+pub const STONE_DIG_STEPS: u8 = 10;
+pub const DEFAULT_SOIL_SETTLE_FREQUENCY: f64 = 0.01;
+pub const DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS: f64 = 5.0;
+pub const DEFAULT_WORLD_MAX_DEPTH: i32 = -255;
+pub const DEFAULT_WORLD_SEED: u64 = 7;
