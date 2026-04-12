@@ -1,5 +1,5 @@
 use antfarm_core::{
-    ClientMessage, FullSyncChunk, FullSyncComplete, FullSyncStart, GameState, PatchFrame,
+    ClientMessage, FullSyncChunk, FullSyncComplete, FullSyncStart, GameState, PatchFrame, Player,
     ServerMessage, Snapshot, TICK_MILLIS, default_server_config,
 };
 use anyhow::{Context, Result};
@@ -32,11 +32,14 @@ type ClientTx = tokio::sync::mpsc::UnboundedSender<ServerMessage>;
 struct ServerState {
     game: Arc<Mutex<GameState>>,
     clients: Arc<Mutex<HashMap<u8, ClientTx>>>,
+    session_tokens: Arc<Mutex<HashMap<u8, String>>>,
     persistence_tx: mpsc::Sender<PersistMessage>,
 }
 
 enum PersistMessage {
     Save(Snapshot),
+    UpsertPlayerProfile { token: String, player: Player },
+    ClearPlayerProfiles,
 }
 
 #[tokio::main]
@@ -66,6 +69,7 @@ async fn main() -> Result<()> {
     let state = ServerState {
         game: Arc::new(Mutex::new(initial_game)),
         clients: Arc::new(Mutex::new(HashMap::new())),
+        session_tokens: Arc::new(Mutex::new(HashMap::new())),
         persistence_tx,
     };
 
@@ -156,19 +160,42 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         let message: ClientMessage = serde_json::from_str(&line)?;
         match message {
-            ClientMessage::Join { name } => {
+            ClientMessage::Join { name, token } => {
                 if player_id.is_some() {
                     continue;
                 }
 
+                let existing_player_id = {
+                    let sessions = state.session_tokens.lock().await;
+                    sessions
+                        .iter()
+                        .find_map(|(id, session_token)| (session_token == &token).then_some(*id))
+                };
+                if existing_player_id.is_some() {
+                    tx.send(ServerMessage::Error {
+                        message: "client token already connected".to_string(),
+                    })?;
+                    continue;
+                }
+
+                let restored_player = load_player_profile(Path::new(SNAPSHOT_DB_PATH), &token)?;
+                let restored = restored_player.is_some();
+
                 let (id, snapshot, join_patch) = {
                     let mut game = state.game.lock().await;
-                    let (id, snapshot) = game.add_player(name).map_err(anyhow::Error::msg)?;
+                    let (id, snapshot) = game
+                        .add_player(name, restored_player)
+                        .map_err(anyhow::Error::msg)?;
                     let patch = game.take_patch();
                     (id, snapshot, patch)
                 };
 
                 state.clients.lock().await.insert(id, tx.clone());
+                state
+                    .session_tokens
+                    .lock()
+                    .await
+                    .insert(id, token.clone());
                 player_id = Some(id);
                 emit_log(
                     "player_join",
@@ -176,8 +203,16 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                         "player_id": id,
                         "name": snapshot.players.iter().find(|player| player.id == id).map(|player| player.name.clone()),
                         "connected_players": snapshot.players.len(),
+                        "restored": restored,
                     }),
                 );
+
+                if let Some(player) = snapshot.players.iter().find(|player| player.id == id) {
+                    let _ = state.persistence_tx.send(PersistMessage::UpsertPlayerProfile {
+                        token: token.clone(),
+                        player: player.clone(),
+                    });
+                }
 
                 send_full_sync(&tx, id, &snapshot)?;
                 if let Some(patch) = join_patch {
@@ -241,6 +276,7 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     snapshot
                 };
                 let _ = state.persistence_tx.send(PersistMessage::Save(snapshot.clone()));
+                let _ = state.persistence_tx.send(PersistMessage::ClearPlayerProfiles);
                 broadcast_full_sync(&state, &snapshot).await?;
             }
         }
@@ -248,9 +284,11 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
 
     if let Some(id) = player_id {
         state.clients.lock().await.remove(&id);
-        let maybe_patch = {
+        let token = state.session_tokens.lock().await.remove(&id);
+        let (maybe_patch, departed_player) = {
             let mut game = state.game.lock().await;
-            let player_name = game.players.get(&id).map(|player| player.name.clone());
+            let departed_player = game.players.get(&id).cloned();
+            let player_name = departed_player.as_ref().map(|player| player.name.clone());
             game.remove_player(id);
             emit_log(
                 "player_leave",
@@ -260,8 +298,13 @@ async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
                     "connected_players": game.players.len(),
                 }),
             );
-            game.take_patch()
+            (game.take_patch(), departed_player)
         };
+        if let (Some(token), Some(player)) = (token, departed_player) {
+            let _ = state
+                .persistence_tx
+                .send(PersistMessage::UpsertPlayerProfile { token, player });
+        }
         if let Some(patch) = maybe_patch {
             broadcast_patch(&state, &patch, None).await?;
         }
@@ -371,6 +414,12 @@ fn persistence_worker_loop(path: PathBuf, rx: mpsc::Receiver<PersistMessage>) ->
                     json!({ "tick": snapshot.tick, "retention": SNAPSHOT_RETENTION }),
                 );
             }
+            PersistMessage::UpsertPlayerProfile { token, player } => {
+                save_player_profile(&connection, &token, &player)?;
+            }
+            PersistMessage::ClearPlayerProfiles => {
+                clear_player_profiles(&connection)?;
+            }
         }
     }
     Ok(())
@@ -388,6 +437,11 @@ fn open_db(path: &Path) -> Result<Connection> {
             tick INTEGER NOT NULL,
             saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             state_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS player_profiles (
+            token TEXT PRIMARY KEY,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            player_json TEXT NOT NULL
         );
         ",
     )?;
@@ -415,6 +469,41 @@ fn save_snapshot(connection: &Connection, snapshot: &Snapshot) -> Result<()> {
         "INSERT INTO world_snapshots (tick, state_json) VALUES (?1, ?2)",
         params![snapshot.tick as i64, state_json],
     )?;
+    Ok(())
+}
+
+fn load_player_profile(path: &Path, token: &str) -> Result<Option<Player>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = open_db(path)?;
+    let mut statement =
+        connection.prepare("SELECT player_json FROM player_profiles WHERE token = ?1 LIMIT 1")?;
+    let mut rows = statement.query(params![token])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let player_json: String = row.get(0)?;
+    Ok(Some(serde_json::from_str::<Player>(&player_json)?))
+}
+
+fn save_player_profile(connection: &Connection, token: &str, player: &Player) -> Result<()> {
+    let player_json = serde_json::to_string(player)?;
+    connection.execute(
+        "
+        INSERT INTO player_profiles (token, player_json, updated_at)
+        VALUES (?1, ?2, CURRENT_TIMESTAMP)
+        ON CONFLICT(token) DO UPDATE SET
+            player_json = excluded.player_json,
+            updated_at = CURRENT_TIMESTAMP
+        ",
+        params![token, player_json],
+    )?;
+    Ok(())
+}
+
+fn clear_player_profiles(connection: &Connection) -> Result<()> {
+    connection.execute("DELETE FROM player_profiles", [])?;
     Ok(())
 }
 

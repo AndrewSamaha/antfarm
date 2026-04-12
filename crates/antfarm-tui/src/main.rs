@@ -9,6 +9,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use rand::{Rng, rng};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -16,9 +17,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    env, io,
+    env, fs, io,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -29,6 +32,11 @@ use tokio::{
 };
 
 const RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(900);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ClientConfig {
+    token: String,
+}
 
 #[derive(Debug)]
 struct App {
@@ -199,6 +207,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {
+    let client_token = load_or_create_client_token(&player_name)?;
     let mut app = App::new(player_name.clone(), 0, offline_snapshot());
     app.sync_state = SyncState::Connecting;
     let mut events = EventStream::new();
@@ -213,7 +222,7 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
         tokio::select! {
             _ = redraw.tick() => app.tick_animation(),
             _ = reconnect.tick(), if connection.is_none() => {
-                match timeout(RECONNECT_ATTEMPT_TIMEOUT, connect_session(&app.player_name)).await {
+                match timeout(RECONNECT_ATTEMPT_TIMEOUT, connect_session(&app.player_name, &client_token)).await {
                     Ok(Ok(new_connection)) => {
                         app.begin_syncing();
                         connection = Some(new_connection);
@@ -250,7 +259,7 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
     Ok(())
 }
 
-async fn connect_session(player_name: &str) -> Result<Connection> {
+async fn connect_session(player_name: &str, client_token: &str) -> Result<Connection> {
     let stream = timeout(
         RECONNECT_ATTEMPT_TIMEOUT,
         TcpStream::connect("127.0.0.1:7000"),
@@ -264,6 +273,7 @@ async fn connect_session(player_name: &str) -> Result<Connection> {
 
     let join = serde_json::to_string(&ClientMessage::Join {
         name: player_name.to_string(),
+        token: client_token.to_string(),
     })?;
     writer.write_all(join.as_bytes()).await?;
     writer.write_all(b"\n").await?;
@@ -286,6 +296,62 @@ async fn connect_session(player_name: &str) -> Result<Connection> {
     });
 
     Ok(Connection { writer, network_rx })
+}
+
+fn load_or_create_client_token(player_name: &str) -> Result<String> {
+    let path = client_config_path(player_name);
+    if path.exists() {
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("read client config at {}", path.display()))?;
+        let config: ClientConfig =
+            toml::from_str(&content).context("parse client config TOML")?;
+        if !config.token.trim().is_empty() {
+            return Ok(config.token);
+        }
+    }
+
+    let token = generate_client_token();
+    let config = ClientConfig {
+        token: token.clone(),
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create client config dir {}", parent.display()))?;
+    }
+    let content = toml::to_string_pretty(&config).context("serialize client config TOML")?;
+    fs::write(&path, content).with_context(|| format!("write client config {}", path.display()))?;
+    Ok(token)
+}
+
+fn client_config_path(player_name: &str) -> PathBuf {
+    let slug = sanitize_player_name(player_name);
+    Path::new("data")
+        .join("clients")
+        .join(format!("{slug}.toml"))
+}
+
+fn sanitize_player_name(player_name: &str) -> String {
+    let mut slug = String::new();
+    for ch in player_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' {
+            slug.push(ch);
+        } else {
+            slug.push('_');
+        }
+    }
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() {
+        "worker-ant".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn generate_client_token() -> String {
+    let token: u128 = rng().random();
+    format!("{token:032x}")
 }
 
 async fn recv_server_message(connection: &mut Option<Connection>) -> Option<ServerMessage> {
@@ -394,8 +460,8 @@ async fn handle_event(
         let action = match app.pending_command {
             PendingCommand::None => default_action(app, dir),
             PendingCommand::PlaceMaterial => {
-                app.last_error = Some("Choose a material first: d for dirt or s for stone".to_string());
-                return Ok(false);
+                app.pending_command = PendingCommand::None;
+                default_action(app, dir)
             }
             PendingCommand::PlaceDirection(material) => {
                 app.pending_command = PendingCommand::None;

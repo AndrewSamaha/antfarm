@@ -287,7 +287,7 @@ pub struct DigProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
-    Join { name: String },
+    Join { name: String, token: String },
     Action(Action),
     ConfigSet { path: String, value: Value },
     WorldReset { seed: Option<u64> },
@@ -424,7 +424,11 @@ impl GameState {
         }
     }
 
-    pub fn add_player(&mut self, name: String) -> Result<(u8, Snapshot), String> {
+    pub fn add_player(
+        &mut self,
+        name: String,
+        restored_player: Option<Player>,
+    ) -> Result<(u8, Snapshot), String> {
         if self.players.len() >= MAX_PLAYERS {
             return Err(format!("Room full: max {} players", MAX_PLAYERS));
         }
@@ -433,7 +437,8 @@ impl GameState {
         self.next_player_id = self.next_player_id.saturating_add(1);
 
         let spawn_x = (8 + self.players.len() as i32 * 6).min(self.world.width() - 2);
-        let player = Player {
+        let was_restored = restored_player.is_some();
+        let mut player = restored_player.unwrap_or_else(|| Player {
             id: player_id,
             name: name.clone(),
             pos: Position {
@@ -442,11 +447,23 @@ impl GameState {
             },
             facing: Facing::Right,
             inventory: default_inventory(),
-        };
+        });
+        player.id = player_id;
+        player.name = name.clone();
+        if !self.world.in_bounds(player.pos) || self.occupied_by_actor(player.pos) {
+            player.pos = Position {
+                x: spawn_x,
+                y: self.world.spawn_y_for_column(spawn_x),
+            };
+        }
 
         self.players.insert(player_id, player);
         self.players_dirty = true;
-        self.push_event(format!("{name} joined as ant {player_id}"));
+        if was_restored {
+            self.push_event(format!("{name} rejoined as ant {player_id}"));
+        } else {
+            self.push_event(format!("{name} joined as ant {player_id}"));
+        }
         Ok((player_id, self.snapshot()))
     }
 
