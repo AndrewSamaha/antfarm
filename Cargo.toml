@@ -3,6 +3,7 @@ members = [
     "crates/antfarm-core",
     "crates/antfarm-server",
     "crates/antfarm-tui",
+    "crates/antfarm-tools",
 ]
 resolver = "3"
 

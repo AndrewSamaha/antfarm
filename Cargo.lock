@@ -29,10 +29,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "antfarm-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "antfarm-tui"
 version = "0.1.0"
 dependencies = [
  "antfarm-core",
+ "antfarm-tools",
  "anyhow",
  "crossterm 0.29.0",
  "futures-util",

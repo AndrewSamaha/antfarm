@@ -1,4 +1,5 @@
 mod app;
+mod art;
 mod client_files;
 mod commands;
 mod input;
