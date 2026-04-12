@@ -2,6 +2,8 @@ mod config;
 mod constants;
 mod game_state;
 mod generation;
+mod inventory;
+mod npc;
 mod protocol;
 mod types;
 mod world;

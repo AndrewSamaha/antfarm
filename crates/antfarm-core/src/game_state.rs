@@ -1,17 +1,18 @@
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::Value;
-use std::collections::HashMap;
-
 use crate::{
     config::{config_f64, config_u64, default_server_config, merge_with_default_config, set_config_path},
     constants::{
         DEFAULT_SOIL_SETTLE_FREQUENCY, DEFAULT_WORLD_SEED,
         DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, MAX_PLAYERS, STONE_DIG_STEPS, WORLD_WIDTH,
     },
+    inventory::{add_inventory, default_inventory, inventory_count, remove_inventory},
+    npc::{default_npcs, nearest_target},
     protocol::{Action, DigProgress, PatchFrame, PlaceMaterial, Snapshot, TileUpdate},
     types::{Facing, MoveDir, NpcAnt, Player, Position, Tile},
     world::World,
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct GameState {
@@ -553,61 +554,4 @@ impl GameState {
             config,
         })
     }
-}
-
-fn default_inventory() -> HashMap<String, u16> {
-    HashMap::from([
-        ("dirt".to_string(), 8),
-        ("ore".to_string(), 0),
-        ("stone".to_string(), 0),
-        ("food".to_string(), 0),
-    ])
-}
-
-fn default_npcs(world: &World) -> Vec<NpcAnt> {
-    let surface_1 = world.spawn_y_for_column(20).saturating_add(1);
-    let surface_2 = world.spawn_y_for_column(120).saturating_add(3);
-    vec![
-        NpcAnt {
-            id: 1,
-            pos: Position {
-                x: 20,
-                y: surface_1.min(world.height() - 2),
-            },
-        },
-        NpcAnt {
-            id: 2,
-            pos: Position {
-                x: 120,
-                y: surface_2.min(world.height() - 2),
-            },
-        },
-    ]
-}
-
-fn inventory_count(inventory: &HashMap<String, u16>, key: &str) -> u16 {
-    inventory.get(key).copied().unwrap_or(0)
-}
-
-fn add_inventory(inventory: &mut HashMap<String, u16>, key: &str, amount: u16) {
-    let entry = inventory.entry(key.to_string()).or_insert(0);
-    *entry = entry.saturating_add(amount);
-}
-
-fn remove_inventory(inventory: &mut HashMap<String, u16>, key: &str, amount: u16) -> bool {
-    let Some(entry) = inventory.get_mut(key) else {
-        return false;
-    };
-    if *entry < amount {
-        return false;
-    }
-    *entry -= amount;
-    true
-}
-
-fn nearest_target(origin: Position, positions: &[Position]) -> Option<Position> {
-    positions
-        .iter()
-        .copied()
-        .min_by_key(|pos| (pos.x - origin.x).abs() + (pos.y - origin.y).abs())
 }
