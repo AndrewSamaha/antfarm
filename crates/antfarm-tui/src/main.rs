@@ -36,6 +36,18 @@ const RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(900);
 #[derive(Debug, Serialize, Deserialize)]
 struct ClientConfig {
     token: String,
+    #[serde(default = "default_show_help_at_startup")]
+    show_help_at_startup: bool,
+    #[serde(default = "default_max_history")]
+    max_history: usize,
+}
+
+fn default_show_help_at_startup() -> bool {
+    true
+}
+
+fn default_max_history() -> usize {
+    100
 }
 
 #[derive(Debug)]
@@ -53,6 +65,8 @@ struct App {
     command_history: Vec<String>,
     command_history_index: Option<usize>,
     last_error: Option<String>,
+    last_info: Option<String>,
+    max_history: usize,
     action_animation: Option<ActionAnimation>,
     sync_state: SyncState,
 }
@@ -79,12 +93,18 @@ struct ActionAnimation {
 }
 
 impl App {
-    fn new(player_name: String, player_id: u8, snapshot: Snapshot) -> Self {
+    fn new(
+        player_name: String,
+        player_id: u8,
+        snapshot: Snapshot,
+        show_help: bool,
+        max_history: usize,
+    ) -> Self {
         Self {
             player_name,
             player_id,
             snapshot,
-            show_help: true,
+            show_help,
             show_params: false,
             params_scroll: 0,
             show_events: false,
@@ -94,6 +114,8 @@ impl App {
             command_history: Vec::new(),
             command_history_index: None,
             last_error: None,
+            last_info: None,
+            max_history,
             action_animation: None,
             sync_state: SyncState::Connecting,
         }
@@ -124,7 +146,7 @@ impl App {
         self.show_params = false;
         self.params_scroll = 0;
         self.action_animation = None;
-        self.last_error = Some(message);
+        self.set_error(message);
     }
 
     fn begin_syncing(&mut self) {
@@ -132,7 +154,7 @@ impl App {
             received_rows: 0,
             total_rows: 0,
         };
-        self.last_error = None;
+        self.clear_status();
     }
 
     fn start_full_sync(&mut self, start: &FullSyncStart) {
@@ -170,7 +192,7 @@ impl App {
         self.snapshot.event_log = complete.event_log;
         self.snapshot.config = complete.config;
         self.sync_state = SyncState::Ready;
-        self.last_error = None;
+        self.clear_status();
     }
 
     fn open_params(&mut self) {
@@ -180,6 +202,21 @@ impl App {
 
     fn is_ready(&self) -> bool {
         matches!(self.sync_state, SyncState::Ready)
+    }
+
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.last_error = Some(message.into());
+        self.last_info = None;
+    }
+
+    fn set_info(&mut self, message: impl Into<String>) {
+        self.last_info = Some(message.into());
+        self.last_error = None;
+    }
+
+    fn clear_status(&mut self) {
+        self.last_error = None;
+        self.last_info = None;
     }
 }
 
@@ -207,8 +244,16 @@ async fn main() -> Result<()> {
 }
 
 async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {
-    let client_token = load_or_create_client_token(&player_name)?;
-    let mut app = App::new(player_name.clone(), 0, offline_snapshot());
+    let client_config = load_or_create_client_config(&player_name)?;
+    let client_token = client_config.token.clone();
+    let mut app = App::new(
+        player_name.clone(),
+        0,
+        offline_snapshot(),
+        client_config.show_help_at_startup,
+        client_config.max_history,
+    );
+    app.command_history = load_command_history(&player_name, app.max_history)?;
     app.sync_state = SyncState::Connecting;
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
@@ -238,7 +283,7 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
                     Some(ServerMessage::FullSyncChunk(chunk)) => app.apply_full_sync_chunk(&chunk),
                     Some(ServerMessage::FullSyncComplete(complete)) => app.finish_full_sync(complete),
                     Some(ServerMessage::Patch(patch)) => apply_patch_frame(&mut app, patch),
-                    Some(ServerMessage::Error { message }) => app.last_error = Some(message),
+                    Some(ServerMessage::Error { message }) => app.set_error(message),
                     None => {
                         connection = None;
                         app.enter_reconnecting("attempting to reconnect".to_string());
@@ -298,29 +343,27 @@ async fn connect_session(player_name: &str, client_token: &str) -> Result<Connec
     Ok(Connection { writer, network_rx })
 }
 
-fn load_or_create_client_token(player_name: &str) -> Result<String> {
+fn load_or_create_client_config(player_name: &str) -> Result<ClientConfig> {
     let path = client_config_path(player_name);
     if path.exists() {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("read client config at {}", path.display()))?;
-        let config: ClientConfig =
+        let mut config: ClientConfig =
             toml::from_str(&content).context("parse client config TOML")?;
-        if !config.token.trim().is_empty() {
-            return Ok(config.token);
+        if config.token.trim().is_empty() {
+            config.token = generate_client_token();
+            save_client_config(player_name, &config)?;
         }
+        return Ok(config);
     }
 
-    let token = generate_client_token();
     let config = ClientConfig {
-        token: token.clone(),
+        token: generate_client_token(),
+        show_help_at_startup: true,
+        max_history: default_max_history(),
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create client config dir {}", parent.display()))?;
-    }
-    let content = toml::to_string_pretty(&config).context("serialize client config TOML")?;
-    fs::write(&path, content).with_context(|| format!("write client config {}", path.display()))?;
-    Ok(token)
+    save_client_config(player_name, &config)?;
+    Ok(config)
 }
 
 fn client_config_path(player_name: &str) -> PathBuf {
@@ -328,6 +371,56 @@ fn client_config_path(player_name: &str) -> PathBuf {
     Path::new("data")
         .join("clients")
         .join(format!("{slug}.toml"))
+}
+
+fn client_history_path(player_name: &str) -> PathBuf {
+    let slug = sanitize_player_name(player_name);
+    Path::new("data")
+        .join("clients")
+        .join(format!("{slug}.history"))
+}
+
+fn save_client_config(player_name: &str, config: &ClientConfig) -> Result<()> {
+    let path = client_config_path(player_name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create client config dir {}", parent.display()))?;
+    }
+    let content = toml::to_string_pretty(config).context("serialize client config TOML")?;
+    fs::write(&path, content).with_context(|| format!("write client config {}", path.display()))?;
+    Ok(())
+}
+
+fn load_command_history(player_name: &str, max_history: usize) -> Result<Vec<String>> {
+    let path = client_history_path(player_name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("read client history at {}", path.display()))?;
+    let mut entries: Vec<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if entries.len() > max_history {
+        let extra = entries.len() - max_history;
+        entries.drain(0..extra);
+    }
+    Ok(entries)
+}
+
+fn save_command_history(player_name: &str, history: &[String], max_history: usize) -> Result<()> {
+    let path = client_history_path(player_name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create client history dir {}", parent.display()))?;
+    }
+    let start = history.len().saturating_sub(max_history);
+    let content = history[start..].join("\n");
+    fs::write(&path, content).with_context(|| format!("write client history {}", path.display()))?;
+    Ok(())
 }
 
 fn sanitize_player_name(player_name: &str) -> String {
@@ -502,11 +595,11 @@ async fn handle_event(
         KeyCode::Char(' ') => app.pending_command = PendingCommand::PlaceMaterial,
         KeyCode::Char('d') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
             app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Dirt);
-            app.last_error = None;
+            app.clear_status();
         }
         KeyCode::Char('s') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
             app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Stone);
-            app.last_error = None;
+            app.clear_status();
         }
         _ => {}
     }
@@ -587,8 +680,8 @@ async fn submit_command(
     writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
 ) -> Result<()> {
     let trimmed = command.trim();
-    if !trimmed.is_empty() {
-        push_command_history(app, trimmed);
+    if !trimmed.is_empty() && push_command_history(app, trimmed) {
+        save_command_history(&app.player_name, &app.command_history, app.max_history)?;
     }
     let mut parts = trimmed.splitn(4, ' ');
     let head = parts.next().unwrap_or_default();
@@ -596,22 +689,69 @@ async fn submit_command(
     let path = parts.next().unwrap_or_default();
     let raw_value = parts.next().unwrap_or_default();
 
-    let Some(writer) = writer else {
-        app.last_error = Some("server unavailable while reconnecting".to_string());
-        return Ok(());
-    };
-
     if trimmed == "/help" {
         app.show_help = true;
-        app.last_error = None;
+        app.clear_status();
         return Ok(());
+    }
+
+    if head == "/cc" && verb == "set" && !path.is_empty() && !raw_value.is_empty() {
+        let mut client_config = load_or_create_client_config(&app.player_name)?;
+        match path {
+            "show_help_at_startup" => {
+                let show_help_at_startup = match raw_value {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        app.set_error("expected: /cc set show_help_at_startup true|false");
+                        return Ok(());
+                    }
+                };
+                client_config.show_help_at_startup = show_help_at_startup;
+                save_client_config(&app.player_name, &client_config)?;
+                app.set_info(format!(
+                    "client config updated: show_help_at_startup={show_help_at_startup}"
+                ));
+                return Ok(());
+            }
+            "max_history" => {
+                let max_history = raw_value
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("max_history must be a positive integer"))?;
+                if max_history == 0 {
+                    app.set_error("max_history must be at least 1");
+                    return Ok(());
+                }
+                client_config.max_history = max_history;
+                save_client_config(&app.player_name, &client_config)?;
+                app.max_history = max_history;
+                if app.command_history.len() > app.max_history {
+                    let extra = app.command_history.len() - app.max_history;
+                    app.command_history.drain(0..extra);
+                }
+                save_command_history(&app.player_name, &app.command_history, app.max_history)?;
+                app.set_info(format!("client config updated: max_history={max_history}"));
+                return Ok(());
+            }
+            _ => {
+                app.set_error(
+                    "expected: /cc set show_help_at_startup true|false or /cc set max_history <n>",
+                );
+                return Ok(());
+            }
+        }
     }
 
     if trimmed == "/sc show_params" {
         app.open_params();
-        app.last_error = None;
+        app.clear_status();
         return Ok(());
     }
+
+    let Some(writer) = writer else {
+        app.set_error("server unavailable while reconnecting");
+        return Ok(());
+    };
 
     if head == "/sc" && verb == "world_reset" {
         let seed = if path.is_empty() {
@@ -623,12 +763,12 @@ async fn submit_command(
             )
         };
         send_message(writer, ClientMessage::WorldReset { seed }).await?;
-        app.last_error = None;
+        app.clear_status();
         return Ok(());
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.last_error = Some("expected: /help, /sc show_params, /sc world_reset [seed], or /sc set <path> <value>".to_string());
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], or /sc set <path> <value>");
         return Ok(());
     }
 
@@ -641,19 +781,20 @@ async fn submit_command(
         },
     )
     .await?;
-    app.last_error = None;
+    app.clear_status();
     Ok(())
 }
 
-fn push_command_history(app: &mut App, command: &str) {
+fn push_command_history(app: &mut App, command: &str) -> bool {
     if app.command_history.last().is_some_and(|last| last == command) {
-        return;
+        return false;
     }
     app.command_history.push(command.to_string());
-    if app.command_history.len() > 50 {
-        let extra = app.command_history.len() - 50;
+    if app.command_history.len() > app.max_history {
+        let extra = app.command_history.len() - app.max_history;
         app.command_history.drain(0..extra);
     }
+    true
 }
 
 fn history_up(app: &mut App) {
@@ -715,6 +856,9 @@ fn command_suggestion(input: &str) -> Option<String> {
 
     let suggestions = [
         "/help",
+        "/cc set show_help_at_startup false",
+        "/cc set show_help_at_startup true",
+        "/cc set max_history 100",
         "/sc show_params",
         "/sc world_reset",
         "/sc world_reset 42",
@@ -742,6 +886,9 @@ fn autocomplete_command(input: &mut String) {
     let trimmed = input.trim_start();
     let suggestions = [
         "/help",
+        "/cc set show_help_at_startup false",
+        "/cc set show_help_at_startup true",
+        "/cc set max_history 100",
         "/sc show_params",
         "/sc world_reset",
         "/sc world_reset 42",
@@ -883,8 +1030,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             format!("error {error}"),
             Style::default().fg(Color::Red),
         )])
+    } else if let Some(info) = &app.last_info {
+        Line::from(vec![Span::styled(
+            info.clone(),
+            Style::default().fg(Color::LightGreen),
+        )])
     } else {
-        Line::from("type / for server config commands")
+        Line::from("type / for client or server config commands")
     };
 
     let paragraph = Paragraph::new(vec![Line::from(top), command_line])
@@ -1014,6 +1166,8 @@ fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Space d h/j/k/l: place dirt"),
         Line::from("Space s h/j/k/l: place stone"),
         Line::from("/help"),
+        Line::from("/cc set show_help_at_startup false"),
+        Line::from("/cc set max_history 100"),
         Line::from("/sc show_params"),
         Line::from("/sc set soil.settle_frequency 0.01"),
         Line::from("/sc set world.max_depth -255"),
