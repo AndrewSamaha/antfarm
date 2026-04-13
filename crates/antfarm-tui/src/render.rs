@@ -2,7 +2,9 @@ use crate::{
     app::{App, PendingCommand},
     modals::{centered_rect, draw_help_modal, draw_params_modal, draw_sync_modal},
 };
-use antfarm_core::{MoveDir, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport};
+use antfarm_core::{
+    MoveDir, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport, find_ascii_art_asset,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -60,9 +62,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let ore = player.inventory.get("ore").copied().unwrap_or(0);
         let stone = player.inventory.get("stone").copied().unwrap_or(0);
         let food = player.inventory.get("food").copied().unwrap_or(0);
+        let queen = player.inventory.get("queen").copied().unwrap_or(0);
         top.push(Span::raw(format!(
-            "  ant={} dirt={} ore={} stone={} food={} pos=({}, {})",
-            player.id, dirt, ore, stone, food, player.pos.x, player.pos.y
+            "  ant={} dirt={} ore={} stone={} food={} queen={} pos=({}, {})",
+            player.id, dirt, ore, stone, food, queen, player.pos.x, player.pos.y
         )));
     }
 
@@ -71,6 +74,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         PendingCommand::PlaceMaterial => Some("PLACE material"),
         PendingCommand::PlaceDirection(PlaceMaterial::Dirt) => Some("PLACE dirt"),
         PendingCommand::PlaceDirection(PlaceMaterial::Stone) => Some("PLACE stone"),
+        PendingCommand::PlaceDirection(PlaceMaterial::Queen) => Some("PLACE queen"),
     };
     if let Some(label) = mode {
         top.push(Span::styled(
@@ -192,6 +196,14 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         );
     }
 
+    if let Some(span) = render_preview_art_cell(app, pos) {
+        return span;
+    }
+
+    if let Some(span) = render_placed_art_cell(app, pos) {
+        return span;
+    }
+
     let Some(tile) = app.snapshot.world.tile(pos) else {
         return Span::raw("  ");
     };
@@ -206,6 +218,50 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         Tile::Food => Span::styled("&&", Style::default().fg(Color::Green)),
         Tile::Bedrock => Span::styled("██", Style::default().fg(Color::DarkGray)),
     }
+}
+
+fn render_placed_art_cell(app: &App, pos: Position) -> Option<Span<'static>> {
+    for placed in &app.snapshot.placed_art {
+        let Some(asset) = find_ascii_art_asset(&placed.asset_id) else {
+            continue;
+        };
+        let local_x = pos.x - placed.pos.x;
+        let local_y = pos.y - placed.pos.y;
+        let Some((left, right)) = asset.glyph_pair_at_world(local_x, local_y) else {
+            continue;
+        };
+        return Some(Span::styled(
+            format!("{left}{right}"),
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    None
+}
+
+fn render_preview_art_cell(app: &App, pos: Position) -> Option<Span<'static>> {
+    if !matches!(
+        app.pending_command,
+        PendingCommand::PlaceDirection(PlaceMaterial::Queen)
+    ) {
+        return None;
+    }
+
+    let player = app.player()?;
+    let asset = find_ascii_art_asset("queen_ant")?;
+    let origin = Position {
+        x: player.pos.x - asset.world_anchor_x(),
+        y: player.pos.y - asset.anchor_y,
+    };
+    let local_x = pos.x - origin.x;
+    let local_y = pos.y - origin.y;
+    let (left, right) = asset.glyph_pair_at_world(local_x, local_y)?;
+
+    Some(Span::styled(
+        format!("{left}{right}"),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
 fn animated_player_glyph(app: &App) -> &'static str {

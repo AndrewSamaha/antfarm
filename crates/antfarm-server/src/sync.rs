@@ -53,6 +53,7 @@ pub(crate) fn send_full_sync(tx: &ClientTx, player_id: u8, snapshot: &Snapshot) 
     tx.send(ServerMessage::FullSyncComplete(FullSyncComplete {
         players: snapshot.players.clone(),
         npcs: snapshot.npcs.clone(),
+        placed_art: snapshot.placed_art.clone(),
         event_log: snapshot.event_log.clone(),
         config: snapshot.config.clone(),
     }))?;

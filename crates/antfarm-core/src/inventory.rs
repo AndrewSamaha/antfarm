@@ -6,6 +6,7 @@ pub(crate) fn default_inventory() -> HashMap<String, u16> {
         ("ore".to_string(), 0),
         ("stone".to_string(), 0),
         ("food".to_string(), 0),
+        ("queen".to_string(), 1),
     ])
 }
 

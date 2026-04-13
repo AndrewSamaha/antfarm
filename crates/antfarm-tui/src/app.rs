@@ -117,6 +117,7 @@ impl App {
         self.snapshot.world = World::empty(start.world_width, start.world_height);
         self.snapshot.players.clear();
         self.snapshot.npcs.clear();
+        self.snapshot.placed_art.clear();
         self.snapshot.event_log.clear();
         self.snapshot.config = default_server_config();
         self.sync_state = SyncState::Syncing {
@@ -143,10 +144,12 @@ impl App {
     pub(crate) fn finish_full_sync(&mut self, complete: FullSyncComplete) {
         self.snapshot.players = complete.players;
         self.snapshot.npcs = complete.npcs;
+        self.snapshot.placed_art = complete.placed_art;
         self.snapshot.event_log = complete.event_log;
         self.snapshot.config = complete.config;
         self.sync_state = SyncState::Ready;
         self.clear_status();
+        self.sync_status_from_latest_event();
     }
 
     pub(crate) fn open_params(&mut self) {
@@ -171,6 +174,31 @@ impl App {
     pub(crate) fn clear_status(&mut self) {
         self.last_error = None;
         self.last_info = None;
+    }
+
+    fn sync_status_from_latest_event(&mut self) {
+        let Some(latest_event) = self.snapshot.event_log.last().cloned() else {
+            return;
+        };
+
+        let lowered = latest_event.to_ascii_lowercase();
+        let looks_like_error = [
+            "could not",
+            "has no",
+            "must place",
+            "hit bedrock",
+            "missing",
+            "no players matched",
+            "unknown resource",
+        ]
+        .iter()
+        .any(|needle| lowered.contains(needle));
+
+        if looks_like_error {
+            self.set_error(latest_event);
+        } else {
+            self.set_info(latest_event);
+        }
     }
 }
 
@@ -197,8 +225,12 @@ fn apply_patch_frame(app: &mut App, patch: PatchFrame) {
     if let Some(npcs) = patch.npcs {
         app.snapshot.npcs = npcs;
     }
+    if let Some(placed_art) = patch.placed_art {
+        app.snapshot.placed_art = placed_art;
+    }
     if let Some(event_log) = patch.event_log {
         app.snapshot.event_log = event_log;
+        app.sync_status_from_latest_event();
     }
     if let Some(config) = patch.config {
         app.snapshot.config = config;

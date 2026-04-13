@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::{
+    art::find_ascii_art_asset,
     config::{
         config_f64, config_u64, default_server_config, merge_with_default_config, set_config_path,
     },
@@ -14,7 +15,7 @@ use crate::{
     },
     inventory::default_inventory,
     npc::default_npcs,
-    protocol::{DigProgress, PatchFrame, Snapshot, TileUpdate},
+    protocol::{DigProgress, PatchFrame, PlacedArt, Snapshot, TileUpdate},
     types::{Facing, NpcAnt, Player, Position, Tile},
     world::World,
 };
@@ -25,12 +26,14 @@ pub struct GameState {
     pub world: World,
     pub players: HashMap<u8, Player>,
     pub npcs: Vec<NpcAnt>,
+    pub placed_art: Vec<PlacedArt>,
     pub event_log: Vec<String>,
     pub config: Value,
     dig_progress: HashMap<u8, DigProgress>,
     dirty_tiles: HashMap<Position, Tile>,
     players_dirty: bool,
     npcs_dirty: bool,
+    placed_art_dirty: bool,
     event_log_dirty: bool,
     config_dirty: bool,
     rng: StdRng,
@@ -53,11 +56,13 @@ impl GameState {
             world,
             players: HashMap::new(),
             event_log: vec!["Server booted ant colony".to_string()],
+            placed_art: Vec::new(),
             config,
             dig_progress: HashMap::new(),
             dirty_tiles: HashMap::new(),
             players_dirty: true,
             npcs_dirty: true,
+            placed_art_dirty: true,
             event_log_dirty: true,
             config_dirty: true,
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
@@ -73,12 +78,14 @@ impl GameState {
             world: snapshot.world,
             players: HashMap::new(),
             npcs: snapshot.npcs,
+            placed_art: snapshot.placed_art,
             event_log: vec!["Server restored world snapshot".to_string()],
             config,
             dig_progress: HashMap::new(),
             dirty_tiles: HashMap::new(),
             players_dirty: true,
             npcs_dirty: true,
+            placed_art_dirty: true,
             event_log_dirty: true,
             config_dirty: true,
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
@@ -94,6 +101,7 @@ impl GameState {
             world: self.world.clone(),
             players,
             npcs: self.npcs.clone(),
+            placed_art: self.placed_art.clone(),
             event_log: self.event_log.clone(),
             config: self.config.clone(),
         }
@@ -163,6 +171,7 @@ impl GameState {
         if self.dirty_tiles.is_empty()
             && !self.players_dirty
             && !self.npcs_dirty
+            && !self.placed_art_dirty
             && !self.event_log_dirty
             && !self.config_dirty
         {
@@ -183,11 +192,13 @@ impl GameState {
         });
 
         let npcs = self.npcs_dirty.then(|| self.npcs.clone());
+        let placed_art = self.placed_art_dirty.then(|| self.placed_art.clone());
         let event_log = self.event_log_dirty.then(|| self.event_log.clone());
         let config = self.config_dirty.then(|| self.config.clone());
 
         self.players_dirty = false;
         self.npcs_dirty = false;
+        self.placed_art_dirty = false;
         self.event_log_dirty = false;
         self.config_dirty = false;
 
@@ -196,6 +207,7 @@ impl GameState {
             tiles,
             players,
             npcs,
+            placed_art,
             event_log,
             config,
         })
@@ -222,5 +234,16 @@ impl GameState {
         if self.world.set_tile(pos, tile) {
             self.dirty_tiles.insert(pos, tile);
         }
+    }
+
+    fn art_occupies_cell(&self, pos: Position) -> bool {
+        self.placed_art.iter().any(|placed| {
+            let Some(asset) = find_ascii_art_asset(&placed.asset_id) else {
+                return false;
+            };
+            let local_x = pos.x - placed.pos.x;
+            let local_y = pos.y - placed.pos.y;
+            asset.glyph_pair_at_world(local_x, local_y).is_some()
+        })
     }
 }

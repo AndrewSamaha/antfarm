@@ -12,6 +12,8 @@ pub struct Snapshot {
     pub world: World,
     pub players: Vec<Player>,
     pub npcs: Vec<NpcAnt>,
+    #[serde(default)]
+    pub placed_art: Vec<PlacedArt>,
     pub event_log: Vec<String>,
     pub config: Value,
 }
@@ -29,6 +31,11 @@ pub enum ClientMessage {
     Join { name: String, token: String },
     Action(Action),
     ConfigSet { path: String, value: Value },
+    Give {
+        target: String,
+        resource: String,
+        amount: u16,
+    },
     WorldReset { seed: Option<u64> },
 }
 
@@ -60,6 +67,8 @@ pub struct FullSyncChunk {
 pub struct FullSyncComplete {
     pub players: Vec<Player>,
     pub npcs: Vec<NpcAnt>,
+    #[serde(default)]
+    pub placed_art: Vec<PlacedArt>,
     pub event_log: Vec<String>,
     pub config: Value,
 }
@@ -70,6 +79,8 @@ pub struct PatchFrame {
     pub tiles: Vec<TileUpdate>,
     pub players: Option<Vec<Player>>,
     pub npcs: Option<Vec<NpcAnt>>,
+    #[serde(default)]
+    pub placed_art: Option<Vec<PlacedArt>>,
     pub event_log: Option<Vec<String>>,
     pub config: Option<Value>,
 }
@@ -81,6 +92,12 @@ pub struct TileUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlacedArt {
+    pub asset_id: String,
+    pub pos: Position,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
     Move(MoveDir),
     Dig(MoveDir),
@@ -88,10 +105,12 @@ pub enum Action {
         dir: MoveDir,
         material: PlaceMaterial,
     },
+    PlaceQueen,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PlaceMaterial {
     Dirt,
     Stone,
+    Queen,
 }

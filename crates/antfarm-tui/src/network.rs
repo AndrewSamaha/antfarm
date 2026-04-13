@@ -93,6 +93,7 @@ pub(crate) fn offline_snapshot() -> Snapshot {
         world: World::empty(1, 1),
         players: Vec::new(),
         npcs: Vec::new(),
+        placed_art: Vec::new(),
         event_log: Vec::new(),
         config: default_server_config(),
     }

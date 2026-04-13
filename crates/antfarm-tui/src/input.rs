@@ -76,7 +76,10 @@ pub(crate) async fn handle_event(
             }
             PendingCommand::PlaceDirection(material) => {
                 app.pending_command = PendingCommand::None;
-                Action::Place { dir, material }
+                match material {
+                    PlaceMaterial::Queen => Action::PlaceQueen,
+                    _ => Action::Place { dir, material },
+                }
             }
         };
         if matches!(action, Action::Dig(_) | Action::Place { .. }) {
@@ -92,6 +95,10 @@ pub(crate) async fn handle_event(
     }
 
     match key.code {
+        KeyCode::Char('q') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
+            app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Queen);
+            app.clear_status();
+        }
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Esc => {
             app.pending_command = PendingCommand::None;

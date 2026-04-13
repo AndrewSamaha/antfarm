@@ -32,8 +32,35 @@ pub(super) async fn submit_server_command(
         return Ok(());
     }
 
+    if head == "/sc" && verb == "give" {
+        let mut args = trimmed.split_whitespace();
+        let _ = args.next();
+        let _ = args.next();
+        let target = args.next().unwrap_or_default();
+        let resource = args.next().unwrap_or_default();
+        let amount_raw = args.next().unwrap_or_default();
+        if target.is_empty() || resource.is_empty() || amount_raw.is_empty() {
+            app.set_error("expected: /sc give <target|all> <resource> <amount>");
+            return Ok(());
+        }
+        let amount = amount_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("give amount must be an unsigned integer"))?;
+        send_message(
+            writer,
+            ClientMessage::Give {
+                target: target.to_string(),
+                resource: resource.to_string(),
+                amount,
+            },
+        )
+        .await?;
+        app.clear_status();
+        return Ok(());
+    }
+
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc give <target|all> <resource> <amount>, or /sc set <path> <value>");
         return Ok(());
     }
 

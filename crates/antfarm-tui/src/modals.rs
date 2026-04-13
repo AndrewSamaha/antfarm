@@ -10,12 +10,15 @@ use ratatui::{
 pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
     let mode_line = match app.pending_command {
         PendingCommand::None => "Move with hjkl. Filled tiles auto-dig.",
-        PendingCommand::PlaceMaterial => "Pending place: choose d for dirt or s for stone.",
+        PendingCommand::PlaceMaterial => "Pending place: choose d for dirt, s for stone, or q for queen.",
         PendingCommand::PlaceDirection(PlaceMaterial::Dirt) => {
             "Pending place dirt: press h, j, k, or l."
         }
         PendingCommand::PlaceDirection(PlaceMaterial::Stone) => {
             "Pending place stone: press h, j, k, or l."
+        }
+        PendingCommand::PlaceDirection(PlaceMaterial::Queen) => {
+            "Queen preview active: h, j, k, or l attempts placement."
         }
     };
 
@@ -23,10 +26,12 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("hjkl: move or auto-dig"),
         Line::from("Space d h/j/k/l: place dirt"),
         Line::from("Space s h/j/k/l: place stone"),
+        Line::from("Space q, then h/j/k/l: preview and place queen"),
         Line::from("/help"),
         Line::from("/cc set show_help_at_startup false"),
         Line::from("/cc set max_history 100"),
         Line::from("/sc show_params"),
+        Line::from("/sc give all q 1"),
         Line::from("/sc set soil.settle_frequency 0.01"),
         Line::from("/sc set world.max_depth -255"),
         Line::from("/sc set world.gen_params.soil.dirt_depth 8"),

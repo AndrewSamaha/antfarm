@@ -1,13 +1,59 @@
 use crate::{
+    art::find_ascii_art_asset,
+    constants::SURFACE_Y,
     constants::{MAX_PLAYERS, STONE_DIG_STEPS},
     inventory::{add_inventory, default_inventory, inventory_count, remove_inventory},
-    protocol::{Action, DigProgress, PlaceMaterial, Snapshot},
+    protocol::{Action, DigProgress, PlaceMaterial, PlacedArt, Snapshot},
     types::{Facing, MoveDir, Player, Position, Tile},
 };
 
 use super::GameState;
 
+const QUEEN_ART_ID: &str = "queen_ant";
+
 impl GameState {
+    pub fn give_resource(
+        &mut self,
+        target: &str,
+        resource: &str,
+        amount: u16,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("give amount must be greater than zero".to_string());
+        }
+
+        let resource_key = normalize_resource_key(resource)
+            .ok_or_else(|| format!("unknown resource: {resource}"))?;
+
+        let mut granted = 0usize;
+        match target {
+            "all" => {
+                for player in self.players.values_mut() {
+                    add_inventory(&mut player.inventory, resource_key, amount);
+                    granted += 1;
+                }
+            }
+            _ => {
+                for player in self.players.values_mut() {
+                    if player.name == target {
+                        add_inventory(&mut player.inventory, resource_key, amount);
+                        granted += 1;
+                    }
+                }
+            }
+        }
+
+        if granted == 0 {
+            return Err(format!("no players matched target: {target}"));
+        }
+
+        self.players_dirty = true;
+        self.push_event(format!(
+            "Granted {amount} {resource_key} to {target} ({granted} players)"
+        ));
+        Ok(())
+    }
+
     pub fn add_player(
         &mut self,
         name: String,
@@ -64,6 +110,7 @@ impl GameState {
             Action::Move(dir) => self.move_player(player_id, dir),
             Action::Dig(dir) => self.dig(player_id, dir),
             Action::Place { dir, material } => self.place(player_id, dir, material),
+            Action::PlaceQueen => self.place_queen(player_id),
         }
     }
 
@@ -202,10 +249,12 @@ impl GameState {
         let inventory_key = match material {
             PlaceMaterial::Dirt => "dirt",
             PlaceMaterial::Stone => "stone",
+            PlaceMaterial::Queen => return,
         };
         let tile = match material {
             PlaceMaterial::Dirt => Tile::Dirt,
             PlaceMaterial::Stone => Tile::Stone,
+            PlaceMaterial::Queen => return,
         };
 
         if inventory_count(&player.inventory, inventory_key) == 0 {
@@ -218,5 +267,122 @@ impl GameState {
         remove_inventory(&mut player.inventory, inventory_key, 1);
         self.set_world_tile(target, tile);
         self.players_dirty = true;
+    }
+
+    fn place_queen(&mut self, player_id: u8) {
+        self.dig_progress.remove(&player_id);
+
+        let Some(player) = self.players.get(&player_id).cloned() else {
+            return;
+        };
+
+        if player.pos.y <= SURFACE_Y {
+            self.push_event(format!(
+                "{} must place the queen in an underground cavern",
+                player.name
+            ));
+            return;
+        }
+
+        if inventory_count(&player.inventory, "queen") == 0 {
+            self.push_event(format!("{} has no queen to place", player.name));
+            return;
+        }
+
+        let Some(asset) = find_ascii_art_asset(QUEEN_ART_ID) else {
+            self.push_event("queen art asset is missing".to_string());
+            return;
+        };
+
+        let preferred = Position {
+            x: player.pos.x - asset.world_anchor_x(),
+            y: player.pos.y - asset.anchor_y,
+        };
+        let Some(pos) = self.find_best_art_placement(asset, preferred) else {
+            self.push_event(format!(
+                "{} could not fit the queen in this cavern",
+                player.name
+            ));
+            return;
+        };
+
+        let Some(player) = self.players.get_mut(&player_id) else {
+            return;
+        };
+        let player_name = player.name.clone();
+        if !remove_inventory(&mut player.inventory, "queen", 1) {
+            let _ = player;
+            self.push_event(format!("{player_name} has no queen to place"));
+            return;
+        }
+        let _ = player;
+
+        self.placed_art.push(PlacedArt {
+            asset_id: QUEEN_ART_ID.to_string(),
+            pos,
+        });
+        self.players_dirty = true;
+        self.placed_art_dirty = true;
+        self.push_event(format!("{player_name} placed the queen"));
+    }
+
+    fn find_best_art_placement(
+        &self,
+        asset: &crate::AsciiArtAsset,
+        preferred: Position,
+    ) -> Option<Position> {
+        let search_radius: i32 = 18;
+        for radius in 0..=search_radius {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if radius != 0 && dx.abs().max(dy.abs()) != radius {
+                        continue;
+                    }
+                    let candidate = preferred.offset(dx, dy);
+                    if self.art_fits_at(asset, candidate) {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn art_fits_at(&self, asset: &crate::AsciiArtAsset, origin: Position) -> bool {
+        for row_index in 0..asset.height {
+            for col_index in 0..asset.world_width() as usize {
+                if asset
+                    .glyph_pair_at_world(col_index as i32, row_index as i32)
+                    .is_none()
+                {
+                    continue;
+                }
+                let pos = Position {
+                    x: origin.x + col_index as i32,
+                    y: origin.y + row_index as i32,
+                };
+                if !self.world.in_bounds(pos) {
+                    return false;
+                }
+                if !matches!(self.world.tile(pos), Some(Tile::Empty)) {
+                    return false;
+                }
+                if self.art_occupies_cell(pos) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+fn normalize_resource_key(resource: &str) -> Option<&'static str> {
+    match resource {
+        "d" | "dirt" => Some("dirt"),
+        "o" | "ore" => Some("ore"),
+        "s" | "stone" => Some("stone"),
+        "f" | "food" => Some("food"),
+        "q" | "queen" => Some("queen"),
+        _ => None,
     }
 }
