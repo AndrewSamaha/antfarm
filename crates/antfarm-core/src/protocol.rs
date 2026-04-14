@@ -95,6 +95,8 @@ pub struct TileUpdate {
 pub struct PlacedArt {
     pub asset_id: String,
     pub pos: Position,
+    #[serde(default)]
+    pub hive_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,5 +114,6 @@ pub enum Action {
 pub enum PlaceMaterial {
     Dirt,
     Stone,
+    Food,
     Queen,
 }

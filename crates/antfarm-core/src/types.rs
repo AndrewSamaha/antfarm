@@ -72,6 +72,8 @@ pub struct Player {
     pub name: String,
     pub pos: Position,
     pub facing: Facing,
+    #[serde(default)]
+    pub hive_id: Option<u16>,
     pub inventory: HashMap<String, u16>,
 }
 
@@ -79,6 +81,46 @@ pub struct Player {
 pub struct NpcAnt {
     pub id: u16,
     pub pos: Position,
+    #[serde(default)]
+    pub kind: NpcKind,
+    #[serde(default = "default_worker_health")]
+    pub health: u16,
+    #[serde(default)]
+    pub food: u16,
+    #[serde(default)]
+    pub hive_id: Option<u16>,
+    #[serde(default)]
+    pub age_ticks: u16,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum NpcKind {
+    #[default]
+    Worker,
+    Queen,
+    Egg,
+}
+
+impl NpcKind {
+    pub fn max_health(self) -> u16 {
+        match self {
+            Self::Worker => crate::constants::NPC_WORKER_MAX_HEALTH,
+            Self::Queen => crate::constants::NPC_QUEEN_MAX_HEALTH,
+            Self::Egg => crate::constants::NPC_EGG_MAX_HEALTH,
+        }
+    }
+
+    pub fn max_food(self) -> u16 {
+        match self {
+            Self::Worker => crate::constants::NPC_WORKER_MAX_FOOD,
+            Self::Queen => crate::constants::NPC_QUEEN_MAX_FOOD,
+            Self::Egg => crate::constants::NPC_EGG_MAX_FOOD,
+        }
+    }
+}
+
+fn default_worker_health() -> u16 {
+    NpcKind::Worker.max_health()
 }
 
 #[derive(Debug, Clone, Copy)]

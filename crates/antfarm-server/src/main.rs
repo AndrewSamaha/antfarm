@@ -8,7 +8,9 @@ mod sync;
 use anyhow::Result;
 use serde_json::json;
 use std::{
+    env,
     collections::HashMap,
+    fs,
     path::PathBuf,
     sync::Arc,
 };
@@ -26,14 +28,25 @@ const SERVER_ADDR: &str = "127.0.0.1:7000";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let reset_world = env::args().skip(1).any(|arg| arg == "--reset-world");
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
     emit_log(
         "starting_server",
         json!({
             "addr": SERVER_ADDR,
             "snapshot_db": snapshot_path.display().to_string(),
+            "reset_world": reset_world,
         }),
     );
+    if reset_world && snapshot_path.exists() {
+        fs::remove_file(&snapshot_path)?;
+        emit_log(
+            "world_db_deleted",
+            json!({
+                "snapshot_db": snapshot_path.display().to_string(),
+            }),
+        );
+    }
     let persistence_tx = spawn_persistence_worker(snapshot_path.clone())?;
     let (initial_game, restored) = load_startup_game(&snapshot_path)?;
 

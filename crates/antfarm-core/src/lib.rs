@@ -17,6 +17,8 @@ pub use config::{
 pub use constants::{
     DEFAULT_SOIL_SETTLE_FREQUENCY, DEFAULT_WORLD_MAX_DEPTH,
     DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, DEFAULT_WORLD_SEED, MAX_PLAYERS, STONE_DIG_STEPS,
+    EGG_HATCH_TICKS, NPC_EGG_MAX_FOOD, NPC_EGG_MAX_HEALTH, NPC_QUEEN_MAX_FOOD,
+    NPC_QUEEN_MAX_HEALTH, NPC_WORKER_MAX_FOOD, NPC_WORKER_MAX_HEALTH, QUEEN_EGG_FOOD_COST,
     SURFACE_Y, TICK_MILLIS, WORLD_WIDTH,
 };
 pub use game_state::GameState;
@@ -24,5 +26,5 @@ pub use protocol::{
     Action, ClientMessage, DigProgress, FullSyncChunk, FullSyncComplete, FullSyncStart, PatchFrame,
     PlaceMaterial, PlacedArt, ServerMessage, Snapshot, TileUpdate,
 };
-pub use types::{Facing, MoveDir, NpcAnt, Player, Position, Tile, Viewport};
+pub use types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, Tile, Viewport};
 pub use world::World;

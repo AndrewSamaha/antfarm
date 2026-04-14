@@ -4,7 +4,7 @@ use crate::{
     constants::{MAX_PLAYERS, STONE_DIG_STEPS},
     inventory::{add_inventory, default_inventory, inventory_count, remove_inventory},
     protocol::{Action, DigProgress, PlaceMaterial, PlacedArt, Snapshot},
-    types::{Facing, MoveDir, Player, Position, Tile},
+    types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, Tile},
 };
 
 use super::GameState;
@@ -76,6 +76,7 @@ impl GameState {
                 y: self.world.spawn_y_for_column(spawn_x),
             },
             facing: Facing::Right,
+            hive_id: None,
             inventory: default_inventory(),
         });
         player.id = player_id;
@@ -249,11 +250,13 @@ impl GameState {
         let inventory_key = match material {
             PlaceMaterial::Dirt => "dirt",
             PlaceMaterial::Stone => "stone",
+            PlaceMaterial::Food => "food",
             PlaceMaterial::Queen => return,
         };
         let tile = match material {
             PlaceMaterial::Dirt => Tile::Dirt,
             PlaceMaterial::Stone => Tile::Stone,
+            PlaceMaterial::Food => Tile::Food,
             PlaceMaterial::Queen => return,
         };
 
@@ -310,20 +313,47 @@ impl GameState {
             return;
         };
         let player_name = player.name.clone();
+        let queen_food = player.inventory.get("food").copied().unwrap_or(0);
+        let hive_id = player.hive_id.unwrap_or_else(|| {
+            let hive_id = self.next_hive_id;
+            self.next_hive_id = self.next_hive_id.saturating_add(1);
+            player.hive_id = Some(hive_id);
+            hive_id
+        });
         if !remove_inventory(&mut player.inventory, "queen", 1) {
             let _ = player;
             self.push_event(format!("{player_name} has no queen to place"));
             return;
         }
+        let _ = player.inventory.insert("food".to_string(), 0);
         let _ = player;
 
+        let queen_pos = Position {
+            x: pos.x + asset.world_anchor_x(),
+            y: pos.y + asset.anchor_y,
+        };
         self.placed_art.push(PlacedArt {
             asset_id: QUEEN_ART_ID.to_string(),
             pos,
+            hive_id: Some(hive_id),
         });
+        self.npcs.push(NpcAnt {
+            id: self.next_npc_id,
+            pos: queen_pos,
+            kind: NpcKind::Queen,
+            health: NpcKind::Queen.max_health(),
+            food: queen_food.min(NpcKind::Queen.max_food()),
+            hive_id: Some(hive_id),
+            age_ticks: 0,
+        });
+        self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;
+        self.npcs_dirty = true;
         self.placed_art_dirty = true;
-        self.push_event(format!("{player_name} placed the queen"));
+        self.push_event(format!(
+            "{player_name} placed the queen with {} food",
+            queen_food.min(NpcKind::Queen.max_food())
+        ));
     }
 
     fn find_best_art_placement(

@@ -3,7 +3,7 @@ use crate::{
     modals::{centered_rect, draw_help_modal, draw_params_modal, draw_sync_modal},
 };
 use antfarm_core::{
-    MoveDir, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport, find_ascii_art_asset,
+    MoveDir, NpcKind, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport, find_ascii_art_asset,
 };
 use ratatui::{
     Frame,
@@ -63,9 +63,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let stone = player.inventory.get("stone").copied().unwrap_or(0);
         let food = player.inventory.get("food").copied().unwrap_or(0);
         let queen = player.inventory.get("queen").copied().unwrap_or(0);
+        let hive = player
+            .hive_id
+            .map(|hive_id| hive_id.to_string())
+            .unwrap_or_else(|| "-".to_string());
         top.push(Span::raw(format!(
-            "  ant={} dirt={} ore={} stone={} food={} queen={} pos=({}, {})",
-            player.id, dirt, ore, stone, food, queen, player.pos.x, player.pos.y
+            "  ant={} hive={} dirt={} ore={} stone={} food={} queen={} pos=({}, {})",
+            player.id, hive, dirt, ore, stone, food, queen, player.pos.x, player.pos.y
         )));
     }
 
@@ -74,6 +78,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         PendingCommand::PlaceMaterial => Some("PLACE material"),
         PendingCommand::PlaceDirection(PlaceMaterial::Dirt) => Some("PLACE dirt"),
         PendingCommand::PlaceDirection(PlaceMaterial::Stone) => Some("PLACE stone"),
+        PendingCommand::PlaceDirection(PlaceMaterial::Food) => Some("PLACE food"),
         PendingCommand::PlaceDirection(PlaceMaterial::Queen) => Some("PLACE queen"),
     };
     if let Some(label) = mode {
@@ -172,6 +177,10 @@ fn draw_world(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_cell(app: &App, pos: Position) -> Span<'static> {
+    if let Some(span) = render_npc_overlay_bar(app, pos) {
+        return span;
+    }
+
     if let Some(player) = app.snapshot.players.iter().find(|player| player.pos == pos) {
         let color = if player.id == app.player_id {
             Color::Green
@@ -189,11 +198,19 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         );
     }
 
-    if app.snapshot.npcs.iter().any(|npc| npc.pos == pos) {
-        return Span::styled(
-            "xx",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        );
+    if let Some(npc) = app.snapshot.npcs.iter().find(|npc| npc.pos == pos) {
+        let color = npc_color(app, npc.hive_id, npc.kind);
+        return match npc.kind {
+            NpcKind::Worker => Span::styled(
+                "xx",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            NpcKind::Egg => Span::styled(
+                "oo",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            NpcKind::Queen => Span::raw("  "),
+        };
     }
 
     if let Some(span) = render_preview_art_cell(app, pos) {
@@ -220,6 +237,41 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
     }
 }
 
+fn render_npc_overlay_bar(app: &App, pos: Position) -> Option<Span<'static>> {
+    if !app.show_npc_bars {
+        return None;
+    }
+
+    let npc = app
+        .snapshot
+        .npcs
+        .iter()
+        .find(|npc| npc.pos.x == pos.x && npc.pos.y - 1 == pos.y)?;
+
+    let health_char = bar_glyph(npc.health, npc.kind.max_health());
+    let food_char = bar_glyph(npc.food, npc.kind.max_food());
+    Some(Span::styled(
+        format!("{health_char}{food_char}"),
+        Style::default().fg(npc_color(app, npc.hive_id, npc.kind)),
+    ))
+}
+
+fn bar_glyph(current: u16, max: u16) -> char {
+    if max == 0 || current == 0 {
+        return '.';
+    }
+    let ratio = current as f32 / max as f32;
+    if ratio >= 0.80 {
+        '█'
+    } else if ratio >= 0.55 {
+        '▓'
+    } else if ratio >= 0.30 {
+        '▒'
+    } else {
+        '░'
+    }
+}
+
 fn render_placed_art_cell(app: &App, pos: Position) -> Option<Span<'static>> {
     for placed in &app.snapshot.placed_art {
         let Some(asset) = find_ascii_art_asset(&placed.asset_id) else {
@@ -233,7 +285,7 @@ fn render_placed_art_cell(app: &App, pos: Position) -> Option<Span<'static>> {
         return Some(Span::styled(
             format!("{left}{right}"),
             Style::default()
-                .fg(Color::LightYellow)
+                .fg(npc_color(app, placed.hive_id, NpcKind::Queen))
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -262,6 +314,23 @@ fn render_preview_art_cell(app: &App, pos: Position) -> Option<Span<'static>> {
         format!("{left}{right}"),
         Style::default().fg(Color::DarkGray),
     ))
+}
+
+fn npc_color(app: &App, npc_hive_id: Option<u16>, kind: NpcKind) -> Color {
+    if app
+        .player()
+        .and_then(|player| player.hive_id)
+        .zip(npc_hive_id)
+        .is_some_and(|(player_hive, npc_hive)| player_hive == npc_hive)
+    {
+        return Color::White;
+    }
+
+    match kind {
+        NpcKind::Worker => Color::Red,
+        NpcKind::Queen => Color::LightYellow,
+        NpcKind::Egg => Color::LightMagenta,
+    }
 }
 
 fn animated_player_glyph(app: &App) -> &'static str {

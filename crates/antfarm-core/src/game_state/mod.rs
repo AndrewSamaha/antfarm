@@ -38,6 +38,8 @@ pub struct GameState {
     config_dirty: bool,
     rng: StdRng,
     next_player_id: u8,
+    next_hive_id: u16,
+    next_npc_id: u16,
 }
 
 impl GameState {
@@ -67,12 +69,28 @@ impl GameState {
             config_dirty: true,
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
+            next_hive_id: 1,
+            next_npc_id: 3,
         }
     }
 
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
         let config = merge_with_default_config(snapshot.config);
         let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
+        let next_hive_id = snapshot
+            .placed_art
+            .iter()
+            .filter_map(|placed| placed.hive_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let next_npc_id = snapshot
+            .npcs
+            .iter()
+            .map(|npc| npc.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         Self {
             tick: snapshot.tick,
             world: snapshot.world,
@@ -90,6 +108,8 @@ impl GameState {
             config_dirty: true,
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
+            next_hive_id,
+            next_npc_id,
         }
     }
 
@@ -146,6 +166,7 @@ impl GameState {
                         y: self.world.spawn_y_for_column(spawn_x),
                     },
                     facing: Facing::Right,
+                    hive_id: None,
                     inventory: default_inventory(),
                 },
             );

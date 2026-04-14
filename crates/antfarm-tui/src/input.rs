@@ -110,6 +110,7 @@ pub(crate) async fn handle_event(
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('e') => app.show_events = !app.show_events,
+        KeyCode::Tab => app.show_npc_bars = !app.show_npc_bars,
         KeyCode::Char('/') => {
             app.command_input = Some("/".to_string());
             app.command_feedback = command_suggestion("/");
@@ -124,6 +125,10 @@ pub(crate) async fn handle_event(
         }
         KeyCode::Char('s') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
             app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Stone);
+            app.clear_status();
+        }
+        KeyCode::Char('f') if matches!(app.pending_command, PendingCommand::PlaceMaterial) => {
+            app.pending_command = PendingCommand::PlaceDirection(PlaceMaterial::Food);
             app.clear_status();
         }
         _ => {}
