@@ -1,4 +1,5 @@
 use crate::{
+    pheromones::AntBehaviorState,
     types::{NpcAnt, NpcKind, Position},
     world::World,
 };
@@ -18,6 +19,13 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
             food: 0,
             hive_id: None,
             age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
         },
         NpcAnt {
             id: 2,
@@ -30,6 +38,13 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
             food: 0,
             hive_id: None,
             age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
         },
     ]
 }

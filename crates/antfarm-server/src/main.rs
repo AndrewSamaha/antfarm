@@ -1,4 +1,5 @@
 mod client_session;
+mod debug_npc;
 mod logging;
 mod persistence;
 mod runtime;
@@ -19,7 +20,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::{
     client_session::{SNAPSHOT_DB_PATH, handle_client},
     logging::{emit_log, world_log_fields},
-    persistence::{load_startup_game, spawn_persistence_worker},
+    persistence::{list_named_gamestates, load_startup_game, spawn_persistence_worker},
     runtime::spawn_background_tasks,
     server_state::ServerState,
 };
@@ -28,7 +29,22 @@ const SERVER_ADDR: &str = "127.0.0.1:7000";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let reset_world = env::args().skip(1).any(|arg| arg == "--reset-world");
+    let args: Vec<String> = env::args().skip(1).collect();
+    let reset_world = args.iter().any(|arg| arg == "--reset-world");
+    let start_paused = args.iter().any(|arg| arg == "--paused");
+    let list_gamestates = args.iter().any(|arg| arg == "--list-gamestates");
+    let mut load_gamestate = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--load-gamestate" {
+            let selector = args
+                .get(index + 1)
+                .ok_or_else(|| anyhow::anyhow!("--load-gamestate requires an id or exact label"))?;
+            load_gamestate = Some(selector.clone());
+            index += 1;
+        }
+        index += 1;
+    }
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
     emit_log(
         "starting_server",
@@ -36,8 +52,21 @@ async fn main() -> Result<()> {
             "addr": SERVER_ADDR,
             "snapshot_db": snapshot_path.display().to_string(),
             "reset_world": reset_world,
+            "start_paused": start_paused,
+            "list_gamestates": list_gamestates,
+            "load_gamestate": load_gamestate,
         }),
     );
+    if list_gamestates {
+        let states = list_named_gamestates(&snapshot_path)?;
+        for state in states {
+            println!(
+                "{}\t{}\t{}\ttick={}",
+                state.id, state.saved_at, state.label, state.tick
+            );
+        }
+        return Ok(());
+    }
     if reset_world && snapshot_path.exists() {
         fs::remove_file(&snapshot_path)?;
         emit_log(
@@ -48,7 +77,8 @@ async fn main() -> Result<()> {
         );
     }
     let persistence_tx = spawn_persistence_worker(snapshot_path.clone())?;
-    let (initial_game, restored) = load_startup_game(&snapshot_path)?;
+    let (initial_game, restored) =
+        load_startup_game(&snapshot_path, start_paused, load_gamestate.as_deref())?;
 
     emit_log(
         "server_start",
@@ -56,6 +86,8 @@ async fn main() -> Result<()> {
             "addr": SERVER_ADDR,
             "snapshot_db": snapshot_path.display().to_string(),
             "restored_snapshot": restored,
+            "simulation_paused": initial_game.simulation_paused,
+            "load_gamestate": load_gamestate,
             "world": world_log_fields(&initial_game),
         }),
     );
@@ -66,6 +98,7 @@ async fn main() -> Result<()> {
         clients: Arc::new(Mutex::new(HashMap::new())),
         session_tokens: Arc::new(Mutex::new(HashMap::new())),
         persistence_tx,
+        npc_debug: Arc::new(Mutex::new(None)),
     };
 
     spawn_background_tasks(&state);

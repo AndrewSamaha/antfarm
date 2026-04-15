@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    pheromones::{PheromoneChannel, PheromoneMap},
     types::{MoveDir, NpcAnt, Player, Position, Tile},
     world::World,
 };
@@ -16,6 +17,8 @@ pub struct Snapshot {
     pub placed_art: Vec<PlacedArt>,
     pub event_log: Vec<String>,
     pub config: Value,
+    #[serde(default)]
+    pub simulation_paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,11 +33,37 @@ pub struct DigProgress {
 pub enum ClientMessage {
     Join { name: String, token: String },
     Action(Action),
+    RequestPheromoneMap {
+        hive_id: u16,
+        channel: PheromoneChannel,
+    },
     ConfigSet { path: String, value: Value },
     Give {
         target: String,
         resource: String,
         amount: u16,
+    },
+    DigArea {
+        width: u16,
+        height: u16,
+    },
+    PutArea {
+        resource: String,
+        width: u16,
+        height: u16,
+    },
+    DebugNpcStart,
+    DebugNpcStop,
+    DebugNpcStatus,
+    SaveGameState {
+        label: String,
+    },
+    ListGameStates,
+    LoadGameState {
+        selector: String,
+    },
+    SetSimulationPaused {
+        paused: bool,
     },
     WorldReset { seed: Option<u64> },
 }
@@ -44,6 +73,7 @@ pub enum ServerMessage {
     FullSyncStart(FullSyncStart),
     FullSyncChunk(FullSyncChunk),
     FullSyncComplete(FullSyncComplete),
+    PheromoneMap(PheromoneMap),
     Patch(PatchFrame),
     Error { message: String },
 }
@@ -71,6 +101,8 @@ pub struct FullSyncComplete {
     pub placed_art: Vec<PlacedArt>,
     pub event_log: Vec<String>,
     pub config: Value,
+    #[serde(default)]
+    pub simulation_paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +115,8 @@ pub struct PatchFrame {
     pub placed_art: Option<Vec<PlacedArt>>,
     pub event_log: Option<Vec<String>>,
     pub config: Option<Value>,
+    #[serde(default)]
+    pub simulation_paused: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

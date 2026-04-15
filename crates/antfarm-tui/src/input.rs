@@ -1,10 +1,10 @@
 use crate::{
     app::{ActionAnimation, App, PendingCommand},
     commands::{command_suggestion, handle_command_input},
-    network::send_action,
+    network::{send_action, send_message},
 };
 use anyhow::Result;
-use antfarm_core::{Action, MoveDir, PlaceMaterial, Position, Tile};
+use antfarm_core::{Action, ClientMessage, MoveDir, PheromoneChannel, PlaceMaterial, Position, Tile};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use std::time::{Duration, Instant};
 
@@ -111,6 +111,28 @@ pub(crate) async fn handle_event(
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('e') => app.show_events = !app.show_events,
         KeyCode::Tab => app.show_npc_bars = !app.show_npc_bars,
+        KeyCode::Char('p') => {
+            if let Some(writer) = writer {
+                send_message(
+                    writer,
+                    ClientMessage::SetSimulationPaused {
+                        paused: !app.snapshot.simulation_paused,
+                    },
+                )
+                .await?;
+            }
+        }
+        KeyCode::Char('o') => {
+            app.pheromone_overlay = match app.pheromone_overlay {
+                None => Some(PheromoneChannel::Home),
+                Some(PheromoneChannel::Home) => Some(PheromoneChannel::Food),
+                Some(PheromoneChannel::Food) => None,
+                Some(PheromoneChannel::Threat | PheromoneChannel::Defense) => None,
+            };
+            if app.pheromone_overlay.is_none() {
+                app.pheromone_map = None;
+            }
+        }
         KeyCode::Char('/') => {
             app.command_input = Some("/".to_string());
             app.command_feedback = command_suggestion("/");

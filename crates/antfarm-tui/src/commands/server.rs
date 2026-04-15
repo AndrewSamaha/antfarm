@@ -18,6 +18,65 @@ pub(super) async fn submit_server_command(
         return Ok(());
     };
 
+    if let Some(raw_label) = trimmed.strip_prefix("/sc save_gamestate ") {
+        let label = trim_wrapped_quotes(raw_label.trim());
+        if label.is_empty() {
+            app.set_error("expected: /sc save_gamestate \"label\"");
+            return Ok(());
+        }
+        send_message(
+            writer,
+            ClientMessage::SaveGameState {
+                label: label.to_string(),
+            },
+        )
+        .await?;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if trimmed == "/sc list_gamestates" {
+        send_message(writer, ClientMessage::ListGameStates).await?;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if let Some(raw_selector) = trimmed.strip_prefix("/sc load_gamestate ") {
+        let selector = trim_wrapped_quotes(raw_selector.trim());
+        if selector.is_empty() {
+            app.set_error("expected: /sc load_gamestate <id|label>");
+            return Ok(());
+        }
+        send_message(
+            writer,
+            ClientMessage::LoadGameState {
+                selector: selector.to_string(),
+            },
+        )
+        .await?;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if head == "/sc" && verb == "game" {
+        match path {
+            "pause" => {
+                send_message(writer, ClientMessage::SetSimulationPaused { paused: true }).await?;
+                app.clear_status();
+                return Ok(());
+            }
+            "unpause" => {
+                send_message(writer, ClientMessage::SetSimulationPaused { paused: false }).await?;
+                app.clear_status();
+                return Ok(());
+            }
+            _ => {
+                app.set_error("expected: /sc game pause|unpause");
+                return Ok(());
+            }
+        }
+    }
+
     if head == "/sc" && verb == "world_reset" {
         let seed = if path.is_empty() {
             None
@@ -59,8 +118,83 @@ pub(super) async fn submit_server_command(
         return Ok(());
     }
 
+    if head == "/sc" && verb == "dig" {
+        let mut args = trimmed.split_whitespace();
+        let _ = args.next();
+        let _ = args.next();
+        let width_raw = args.next().unwrap_or_default();
+        let height_raw = args.next().unwrap_or_default();
+        if width_raw.is_empty() || height_raw.is_empty() {
+            app.set_error("expected: /sc dig <width> <height>");
+            return Ok(());
+        }
+        let width = width_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("dig width must be an unsigned integer"))?;
+        let height = height_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("dig height must be an unsigned integer"))?;
+        send_message(writer, ClientMessage::DigArea { width, height }).await?;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if head == "/sc" && verb == "put" {
+        let mut args = trimmed.split_whitespace();
+        let _ = args.next();
+        let _ = args.next();
+        let resource = args.next().unwrap_or_default();
+        let width_raw = args.next().unwrap_or_default();
+        let height_raw = args.next().unwrap_or_default();
+        if resource.is_empty() || width_raw.is_empty() || height_raw.is_empty() {
+            app.set_error("expected: /sc put <resource> <width> <height>");
+            return Ok(());
+        }
+        let width = width_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("put width must be an unsigned integer"))?;
+        let height = height_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("put height must be an unsigned integer"))?;
+        send_message(
+            writer,
+            ClientMessage::PutArea {
+                resource: resource.to_string(),
+                width,
+                height,
+            },
+        )
+        .await?;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if head == "/sc" && verb == "debug.npc" {
+        match path {
+            "start" => {
+                send_message(writer, ClientMessage::DebugNpcStart).await?;
+                app.clear_status();
+                return Ok(());
+            }
+            "stop" => {
+                send_message(writer, ClientMessage::DebugNpcStop).await?;
+                app.clear_status();
+                return Ok(());
+            }
+            "status" => {
+                send_message(writer, ClientMessage::DebugNpcStatus).await?;
+                app.clear_status();
+                return Ok(());
+            }
+            _ => {
+                app.set_error("expected: /sc debug.npc start|stop|status");
+                return Ok(());
+            }
+        }
+    }
+
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc give <target|all> <resource> <amount>, or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <target|all> <resource> <amount>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
         return Ok(());
     }
 
@@ -75,4 +209,16 @@ pub(super) async fn submit_server_command(
     .await?;
     app.clear_status();
     Ok(())
+}
+
+fn trim_wrapped_quotes(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value)
 }

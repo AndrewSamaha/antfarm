@@ -8,13 +8,17 @@ use tokio::{
 };
 
 use crate::{
+    debug_npc::{start_npc_debug_session, stop_npc_debug_session},
     logging::{emit_log, world_log_fields},
-    persistence::load_player_profile,
+    persistence::{
+        list_named_gamestates, load_named_gamestate, load_player_profile, save_named_gamestate,
+    },
     server_state::{PersistMessage, ServerState},
     sync::{broadcast_full_sync, broadcast_patch, send_full_sync},
 };
 
 pub(crate) const SNAPSHOT_DB_PATH: &str = "data/antfarm.sqlite3";
+const NPC_DEBUG_DIR: &str = "data";
 
 pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
@@ -111,6 +115,13 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     broadcast_patch(&state, &patch, None).await?;
                 }
             }
+            ClientMessage::RequestPheromoneMap { hive_id, channel } => {
+                let map = {
+                    let game = state.game.lock().await;
+                    game.pheromone_map(hive_id, channel)
+                };
+                tx.send(ServerMessage::PheromoneMap(map))?;
+            }
             ClientMessage::ConfigSet { path, value } => {
                 let Some(_id) = player_id else {
                     tx.send(ServerMessage::Error {
@@ -169,6 +180,185 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     broadcast_patch(&state, &patch, None).await?;
                 }
             }
+            ClientMessage::DigArea { width, height } => {
+                let Some(id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before using dig".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let (maybe_patch, snapshot) = {
+                    let mut game = state.game.lock().await;
+                    game.dig_area(id, width, height)
+                        .map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
+                };
+
+                emit_log(
+                    "sc_dig",
+                    json!({
+                        "player_id": id,
+                        "width": width,
+                        "height": height,
+                    }),
+                );
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::PutArea {
+                resource,
+                width,
+                height,
+            } => {
+                let Some(id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before using put".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let logged_resource = resource.clone();
+                let (maybe_patch, snapshot) = {
+                    let mut game = state.game.lock().await;
+                    game.put_area(id, &resource, width, height)
+                        .map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
+                };
+
+                emit_log(
+                    "sc_put",
+                    json!({
+                        "player_id": id,
+                        "resource": logged_resource,
+                        "width": width,
+                        "height": height,
+                    }),
+                );
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::SaveGameState { label } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before saving game state".to_string(),
+                    })?;
+                    continue;
+                };
+                let label = label.trim();
+                if label.is_empty() {
+                    tx.send(ServerMessage::Error {
+                        message: "save_gamestate label cannot be empty".to_string(),
+                    })?;
+                    continue;
+                }
+                let snapshot = {
+                    let game = state.game.lock().await;
+                    game.snapshot()
+                };
+                let save_id = save_named_gamestate(Path::new(SNAPSHOT_DB_PATH), label, &snapshot)?;
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    game.push_server_event(format!(
+                        "Saved game state #{save_id}: {label} (tick {})",
+                        snapshot.tick
+                    ));
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::ListGameStates => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before listing game states".to_string(),
+                    })?;
+                    continue;
+                };
+                let states = list_named_gamestates(Path::new(SNAPSHOT_DB_PATH))?;
+                let summary = if states.is_empty() {
+                    "Saved game states: none".to_string()
+                } else {
+                    let entries = states
+                        .iter()
+                        .take(5)
+                        .map(|state| {
+                            format!(
+                                "#{} '{}' @ tick {} ({})",
+                                state.id, state.label, state.tick, state.saved_at
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let suffix = if states.len() > 5 { ", ..." } else { "" };
+                    format!("Saved game states: {entries}{suffix}")
+                };
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    game.push_server_event(summary);
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::LoadGameState { selector } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before loading game state".to_string(),
+                    })?;
+                    continue;
+                };
+                let selector = selector.trim();
+                if selector.is_empty() {
+                    tx.send(ServerMessage::Error {
+                        message: "load_gamestate requires an id or exact label".to_string(),
+                    })?;
+                    continue;
+                }
+                let Some(snapshot) = load_named_gamestate(Path::new(SNAPSHOT_DB_PATH), selector)? else {
+                    tx.send(ServerMessage::Error {
+                        message: format!("no saved game state matched: {selector}"),
+                    })?;
+                    continue;
+                };
+                let snapshot = {
+                    let mut game = state.game.lock().await;
+                    *game = antfarm_core::GameState::from_snapshot(snapshot);
+                    game.push_server_event(format!("Loaded game state: {selector}"));
+                    game.snapshot()
+                };
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot.clone()));
+                broadcast_full_sync(&state, &snapshot).await?;
+            }
+            ClientMessage::SetSimulationPaused { paused } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before changing simulation pause state".to_string(),
+                    })?;
+                    continue;
+                };
+                let (maybe_patch, snapshot) = {
+                    let mut game = state.game.lock().await;
+                    game.set_simulation_paused(paused);
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
+                };
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
             ClientMessage::WorldReset { seed } => {
                 let snapshot = {
                     let mut game = state.game.lock().await;
@@ -187,6 +377,90 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                 let _ = state.persistence_tx.send(PersistMessage::Save(snapshot.clone()));
                 let _ = state.persistence_tx.send(PersistMessage::ClearPlayerProfiles);
                 broadcast_full_sync(&state, &snapshot).await?;
+            }
+            ClientMessage::DebugNpcStart => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before starting NPC debug".to_string(),
+                    })?;
+                    continue;
+                };
+                if state.npc_debug.lock().await.is_some() {
+                    tx.send(ServerMessage::Error {
+                        message: "NPC debug is already active".to_string(),
+                    })?;
+                    continue;
+                }
+                let session = start_npc_debug_session(Path::new(NPC_DEBUG_DIR))?;
+                let path = session.path.display().to_string();
+                {
+                    let mut game = state.game.lock().await;
+                    game.set_npc_debug_enabled(true);
+                    game.push_server_event(format!("NPC debug started: {path}"));
+                }
+                *state.npc_debug.lock().await = Some(session);
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::DebugNpcStop => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before stopping NPC debug".to_string(),
+                    })?;
+                    continue;
+                };
+                let session = state.npc_debug.lock().await.take();
+                let Some(session) = session else {
+                    tx.send(ServerMessage::Error {
+                        message: "NPC debug is not active".to_string(),
+                    })?;
+                    continue;
+                };
+                let path = session.path.display().to_string();
+                {
+                    let mut game = state.game.lock().await;
+                    game.set_npc_debug_enabled(false);
+                    game.take_npc_debug_events();
+                    game.push_server_event(format!("NPC debug stopped: {path}"));
+                }
+                stop_npc_debug_session(session);
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::DebugNpcStatus => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before checking NPC debug status".to_string(),
+                    })?;
+                    continue;
+                };
+                let active_path = state
+                    .npc_debug
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|session| session.path.display().to_string());
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    match active_path {
+                        Some(path) => game.push_server_event(format!("NPC debug active: {path}")),
+                        None => game.push_server_event("NPC debug inactive".to_string()),
+                    }
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
             }
         }
     }

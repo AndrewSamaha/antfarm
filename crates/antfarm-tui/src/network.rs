@@ -96,5 +96,6 @@ pub(crate) fn offline_snapshot() -> Snapshot {
         placed_art: Vec::new(),
         event_log: Vec::new(),
         config: default_server_config(),
+        simulation_paused: false,
     }
 }

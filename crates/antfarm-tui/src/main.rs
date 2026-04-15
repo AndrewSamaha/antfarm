@@ -18,6 +18,7 @@ use crate::{
     render::draw,
 };
 use anyhow::Result;
+use antfarm_core::ClientMessage;
 use crossterm::{
     event::EventStream,
     execute,
@@ -60,7 +61,9 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
     let mut reconnect = time::interval(Duration::from_millis(1000));
+    let mut pheromone_refresh = time::interval(Duration::from_millis(500));
     reconnect.tick().await;
+    pheromone_refresh.tick().await;
     let mut connection: Option<Connection> = None;
 
     loop {
@@ -76,6 +79,16 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
                     }
                     Ok(Err(_)) | Err(_) => {
                         app.enter_reconnecting("attempting to reconnect".to_string());
+                    }
+                }
+            }
+            _ = pheromone_refresh.tick(), if connection.is_some() => {
+                if let (Some(channel), Some(player), Some(connection)) = (app.pheromone_overlay, app.player(), connection.as_mut()) {
+                    if let Some(hive_id) = player.hive_id {
+                        crate::network::send_message(
+                            &mut connection.writer,
+                            ClientMessage::RequestPheromoneMap { hive_id, channel },
+                        ).await?;
                     }
                 }
             }

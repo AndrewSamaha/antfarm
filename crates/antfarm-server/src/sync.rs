@@ -56,6 +56,7 @@ pub(crate) fn send_full_sync(tx: &ClientTx, player_id: u8, snapshot: &Snapshot) 
         placed_art: snapshot.placed_art.clone(),
         event_log: snapshot.event_log.clone(),
         config: snapshot.config.clone(),
+        simulation_paused: snapshot.simulation_paused,
     }))?;
     Ok(())
 }

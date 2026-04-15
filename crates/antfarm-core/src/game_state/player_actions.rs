@@ -1,5 +1,6 @@
 use crate::{
     art::find_ascii_art_asset,
+    pheromones::AntBehaviorState,
     constants::SURFACE_Y,
     constants::{MAX_PLAYERS, STONE_DIG_STEPS},
     inventory::{add_inventory, default_inventory, inventory_count, remove_inventory},
@@ -12,6 +13,116 @@ use super::GameState;
 const QUEEN_ART_ID: &str = "queen_ant";
 
 impl GameState {
+    pub fn dig_area(&mut self, player_id: u8, width: u16, height: u16) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Err("dig dimensions must be greater than zero".to_string());
+        }
+
+        let Some(player) = self.players.get(&player_id).cloned() else {
+            return Err("unknown player".to_string());
+        };
+
+        let half_w = i32::from(width) / 2;
+        let half_h = i32::from(height) / 2;
+        let left = player.pos.x - half_w;
+        let top = player.pos.y - half_h;
+
+        let mut dirt = 0u16;
+        let mut stone = 0u16;
+        let mut ore = 0u16;
+        let mut food = 0u16;
+
+        for dy in 0..i32::from(height) {
+            for dx in 0..i32::from(width) {
+                let pos = Position {
+                    x: left + dx,
+                    y: top + dy,
+                };
+                let Some(tile) = self.world.tile(pos) else {
+                    continue;
+                };
+                match tile {
+                    Tile::Empty | Tile::Bedrock => continue,
+                    Tile::Dirt => dirt = dirt.saturating_add(1),
+                    Tile::Stone => stone = stone.saturating_add(1),
+                    Tile::Resource => ore = ore.saturating_add(1),
+                    Tile::Food => food = food.saturating_add(1),
+                }
+                self.set_world_tile(pos, Tile::Empty);
+            }
+        }
+
+        let Some(player) = self.players.get_mut(&player_id) else {
+            return Err("unknown player".to_string());
+        };
+        let player_name = player.name.clone();
+        if dirt > 0 {
+            add_inventory(&mut player.inventory, "dirt", dirt);
+        }
+        if stone > 0 {
+            add_inventory(&mut player.inventory, "stone", stone);
+        }
+        if ore > 0 {
+            add_inventory(&mut player.inventory, "ore", ore);
+        }
+        if food > 0 {
+            add_inventory(&mut player.inventory, "food", food);
+        }
+        let _ = player;
+        self.players_dirty = true;
+        self.push_event(format!(
+            "{} excavated {}x{} around the colony",
+            player_name, width, height
+        ));
+        Ok(())
+    }
+
+    pub fn put_area(
+        &mut self,
+        player_id: u8,
+        resource: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Err("put dimensions must be greater than zero".to_string());
+        }
+
+        let tile = put_resource_tile(resource)
+            .ok_or_else(|| format!("unsupported put resource: {resource}"))?;
+
+        let Some(player) = self.players.get(&player_id).cloned() else {
+            return Err("unknown player".to_string());
+        };
+
+        let left = player.pos.x + 1;
+        let top = player.pos.y;
+        let mut placed = 0u16;
+
+        for dy in 0..=i32::from(height) {
+            for dx in 0..=i32::from(width) {
+                let pos = Position {
+                    x: left + dx,
+                    y: top + dy,
+                };
+                if !self.world.in_bounds(pos) || self.occupied_by_actor(pos) {
+                    continue;
+                }
+                if matches!(self.world.tile(pos), Some(Tile::Bedrock) | None) {
+                    continue;
+                }
+                self.set_world_tile(pos, tile);
+                placed = placed.saturating_add(1);
+            }
+        }
+
+        self.push_event(format!(
+            "{} placed {} {} tiles to the right",
+            player.name, placed, resource
+        ));
+        Ok(())
+    }
+
     pub fn give_resource(
         &mut self,
         target: &str,
@@ -345,6 +456,13 @@ impl GameState {
             food: queen_food.min(NpcKind::Queen.max_food()),
             hive_id: Some(hive_id),
             age_ticks: 0,
+            behavior: AntBehaviorState::Idle,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;
@@ -413,6 +531,16 @@ fn normalize_resource_key(resource: &str) -> Option<&'static str> {
         "s" | "stone" => Some("stone"),
         "f" | "food" => Some("food"),
         "q" | "queen" => Some("queen"),
+        _ => None,
+    }
+}
+
+fn put_resource_tile(resource: &str) -> Option<Tile> {
+    match resource {
+        "d" | "dirt" => Some(Tile::Dirt),
+        "s" | "stone" => Some(Tile::Stone),
+        "f" | "food" => Some(Tile::Food),
+        "o" | "ore" | "resource" => Some(Tile::Resource),
         _ => None,
     }
 }

@@ -1,6 +1,6 @@
 use antfarm_core::{
-    FullSyncChunk, FullSyncComplete, FullSyncStart, MoveDir, PatchFrame, PlaceMaterial, Player,
-    ServerMessage, Snapshot, World, default_server_config,
+    FullSyncChunk, FullSyncComplete, FullSyncStart, MoveDir, PatchFrame, PheromoneChannel,
+    PheromoneMap, PlaceMaterial, Player, ServerMessage, Snapshot, World, default_server_config,
 };
 use std::time::Instant;
 
@@ -14,6 +14,8 @@ pub(crate) struct App {
     pub(crate) params_scroll: u16,
     pub(crate) show_events: bool,
     pub(crate) show_npc_bars: bool,
+    pub(crate) pheromone_overlay: Option<PheromoneChannel>,
+    pub(crate) pheromone_map: Option<PheromoneMap>,
     pub(crate) pending_command: PendingCommand,
     pub(crate) command_input: Option<String>,
     pub(crate) command_feedback: Option<String>,
@@ -64,6 +66,8 @@ impl App {
             params_scroll: 0,
             show_events: false,
             show_npc_bars: false,
+            pheromone_overlay: None,
+            pheromone_map: None,
             pending_command: PendingCommand::None,
             command_input: None,
             command_feedback: None,
@@ -102,6 +106,7 @@ impl App {
         self.show_params = false;
         self.params_scroll = 0;
         self.action_animation = None;
+        self.pheromone_map = None;
         self.set_error(message);
     }
 
@@ -122,6 +127,8 @@ impl App {
         self.snapshot.placed_art.clear();
         self.snapshot.event_log.clear();
         self.snapshot.config = default_server_config();
+        self.snapshot.simulation_paused = false;
+        self.pheromone_map = None;
         self.sync_state = SyncState::Syncing {
             received_rows: 0,
             total_rows: start.total_rows,
@@ -149,6 +156,7 @@ impl App {
         self.snapshot.placed_art = complete.placed_art;
         self.snapshot.event_log = complete.event_log;
         self.snapshot.config = complete.config;
+        self.snapshot.simulation_paused = complete.simulation_paused;
         self.sync_state = SyncState::Ready;
         self.clear_status();
         self.sync_status_from_latest_event();
@@ -209,6 +217,7 @@ pub(crate) fn handle_server_message(app: &mut App, message: ServerMessage) {
         ServerMessage::FullSyncStart(start) => app.start_full_sync(&start),
         ServerMessage::FullSyncChunk(chunk) => app.apply_full_sync_chunk(&chunk),
         ServerMessage::FullSyncComplete(complete) => app.finish_full_sync(complete),
+        ServerMessage::PheromoneMap(map) => app.pheromone_map = Some(map),
         ServerMessage::Patch(patch) => apply_patch_frame(app, patch),
         ServerMessage::Error { message } => app.set_error(message),
     }
@@ -236,5 +245,8 @@ fn apply_patch_frame(app: &mut App, patch: PatchFrame) {
     }
     if let Some(config) = patch.config {
         app.snapshot.config = config;
+    }
+    if let Some(simulation_paused) = patch.simulation_paused {
+        app.snapshot.simulation_paused = simulation_paused;
     }
 }

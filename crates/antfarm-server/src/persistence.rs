@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use antfarm_core::{GameState, Player, Snapshot, default_server_config};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -16,9 +16,42 @@ use crate::{
 
 pub(crate) const SNAPSHOT_RETENTION: i64 = 10;
 
-pub(crate) fn load_startup_game(path: &Path) -> Result<(GameState, bool)> {
+#[derive(Debug, Clone)]
+pub(crate) struct NamedGameStateInfo {
+    pub(crate) id: i64,
+    pub(crate) label: String,
+    pub(crate) saved_at: String,
+    pub(crate) tick: u64,
+}
+
+pub(crate) fn load_startup_game(
+    path: &Path,
+    start_paused: bool,
+    load_gamestate: Option<&str>,
+) -> Result<(GameState, bool)> {
+    if let Some(selector) = load_gamestate {
+        let snapshot = load_named_gamestate(path, selector)?
+            .ok_or_else(|| anyhow!("named gamestate not found: {selector}"))?;
+        let mut game = GameState::from_snapshot(snapshot);
+        if start_paused {
+            game.set_simulation_paused(true);
+        }
+        emit_log(
+            "loading_named_gamestate",
+            json!({
+                "selector": selector,
+                "simulation_paused": game.simulation_paused,
+            }),
+        );
+        return Ok((game, true));
+    }
+
     if let Some(snapshot) = load_latest_snapshot(path)? {
-        Ok((GameState::from_snapshot(snapshot), true))
+        let mut game = GameState::from_snapshot(snapshot);
+        if start_paused {
+            game.set_simulation_paused(true);
+        }
+        Ok((game, true))
     } else {
         let config = default_server_config();
         emit_log(
@@ -32,7 +65,11 @@ pub(crate) fn load_startup_game(path: &Path) -> Result<(GameState, bool)> {
                 }
             }),
         );
-        Ok((GameState::from_config(config), false))
+        let mut game = GameState::from_config(config);
+        if start_paused {
+            game.set_simulation_paused(true);
+        }
+        Ok((game, false))
     }
 }
 
@@ -63,6 +100,70 @@ pub(crate) fn load_player_profile(path: &Path, token: &str) -> Result<Option<Pla
     };
     let player_json: String = row.get(0)?;
     Ok(Some(serde_json::from_str::<Player>(&player_json)?))
+}
+
+pub(crate) fn save_named_gamestate(path: &Path, label: &str, snapshot: &Snapshot) -> Result<i64> {
+    let connection = open_db(path)?;
+    let state_json = serde_json::to_string(snapshot)?;
+    connection.execute(
+        "
+        INSERT INTO named_gamestates (label, tick, state_json)
+        VALUES (?1, ?2, ?3)
+        ",
+        params![label, snapshot.tick as i64, state_json],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+pub(crate) fn list_named_gamestates(path: &Path) -> Result<Vec<NamedGameStateInfo>> {
+    let connection = open_db(path)?;
+    let mut statement = connection.prepare(
+        "
+        SELECT id, label, saved_at, tick
+        FROM named_gamestates
+        ORDER BY id DESC
+        ",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(NamedGameStateInfo {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            saved_at: row.get(2)?,
+            tick: row.get::<_, i64>(3)? as u64,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub(crate) fn load_named_gamestate(path: &Path, selector: &str) -> Result<Option<Snapshot>> {
+    let connection = open_db(path)?;
+    let state_json: Option<String> = if let Ok(id) = selector.parse::<i64>() {
+        connection
+            .query_row(
+                "SELECT state_json FROM named_gamestates WHERE id = ?1 LIMIT 1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+    } else {
+        connection
+            .query_row(
+                "
+                SELECT state_json
+                FROM named_gamestates
+                WHERE label = ?1
+                ORDER BY id DESC
+                LIMIT 1
+                ",
+                params![selector],
+                |row| row.get(0),
+            )
+            .optional()?
+    };
+    state_json
+        .map(|state_json| serde_json::from_str::<Snapshot>(&state_json))
+        .transpose()
+        .map_err(Into::into)
 }
 
 fn persistence_worker_loop(path: PathBuf, rx: mpsc::Receiver<PersistMessage>) -> Result<()> {
@@ -105,6 +206,13 @@ fn open_db(path: &Path) -> Result<Connection> {
             token TEXT PRIMARY KEY,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             player_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS named_gamestates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            tick INTEGER NOT NULL,
+            saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            state_json TEXT NOT NULL
         );
         ",
     )?;

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::world::World;
+use crate::{pheromones::AntBehaviorState, world::World};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Position {
@@ -91,6 +91,20 @@ pub struct NpcAnt {
     pub hive_id: Option<u16>,
     #[serde(default)]
     pub age_ticks: u16,
+    #[serde(default)]
+    pub behavior: AntBehaviorState,
+    #[serde(default)]
+    pub carrying_food: bool,
+    #[serde(default)]
+    pub carrying_food_ticks: u16,
+    #[serde(default)]
+    pub recent_home_dir: Option<MoveDir>,
+    #[serde(default)]
+    pub recent_food_dir: Option<MoveDir>,
+    #[serde(default)]
+    pub recent_home_memory_ticks: u8,
+    #[serde(default)]
+    pub recent_food_memory_ticks: u8,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

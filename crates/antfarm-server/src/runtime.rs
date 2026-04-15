@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::time;
 
 use crate::{
+    debug_npc::send_npc_debug_events,
     logging::emit_log,
     server_state::{PersistMessage, ServerState},
     sync::broadcast_patch,
@@ -19,10 +20,13 @@ pub(crate) fn spawn_background_tasks(state: &ServerState) {
             let mut last_snapshot_at = Instant::now();
             loop {
                 ticker.tick().await;
-                let (maybe_patch, maybe_snapshot) = {
+                let (maybe_patch, maybe_snapshot, npc_debug_events) = {
                     let mut game = tick_state.game.lock().await;
-                    game.tick();
+                    if !game.simulation_paused {
+                        game.tick();
+                    }
                     let patch = game.take_patch();
+                    let npc_debug_events = game.take_npc_debug_events();
                     let interval = Duration::from_secs_f64(game.snapshot_interval_seconds());
                     let snapshot = if last_snapshot_at.elapsed() >= interval {
                         last_snapshot_at = Instant::now();
@@ -30,11 +34,17 @@ pub(crate) fn spawn_background_tasks(state: &ServerState) {
                     } else {
                         None
                     };
-                    (patch, snapshot)
+                    (patch, snapshot, npc_debug_events)
                 };
 
                 if let Some(snapshot) = maybe_snapshot {
                     let _ = tick_state.persistence_tx.send(PersistMessage::Save(snapshot));
+                }
+                if !npc_debug_events.is_empty() {
+                    let session = tick_state.npc_debug.lock().await.clone();
+                    if let Some(session) = session {
+                        send_npc_debug_events(&session, npc_debug_events);
+                    }
                 }
                 if let Some(patch) = maybe_patch {
                     if let Err(error) = broadcast_patch(&tick_state, &patch, None).await {

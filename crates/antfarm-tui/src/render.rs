@@ -3,7 +3,8 @@ use crate::{
     modals::{centered_rect, draw_help_modal, draw_params_modal, draw_sync_modal},
 };
 use antfarm_core::{
-    MoveDir, NpcKind, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport, find_ascii_art_asset,
+    MoveDir, NpcKind, PheromoneChannel, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport,
+    find_ascii_art_asset,
 };
 use ratatui::{
     Frame,
@@ -71,6 +72,32 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             "  ant={} hive={} dirt={} ore={} stone={} food={} queen={} pos=({}, {})",
             player.id, hive, dirt, ore, stone, food, queen, player.pos.x, player.pos.y
         )));
+    }
+
+    top.push(Span::styled(
+        if app.snapshot.simulation_paused {
+            "  sim=paused"
+        } else {
+            "  sim=running"
+        },
+        Style::default().fg(if app.snapshot.simulation_paused {
+            Color::LightRed
+        } else {
+            Color::LightGreen
+        }),
+    ));
+
+    if let Some(channel) = app.pheromone_overlay {
+        let label = match channel {
+            PheromoneChannel::Home => "home",
+            PheromoneChannel::Food => "food",
+            PheromoneChannel::Threat => "threat",
+            PheromoneChannel::Defense => "defense",
+        };
+        top.push(Span::styled(
+            format!("  pheromone={label}"),
+            Style::default().fg(Color::LightMagenta),
+        ));
     }
 
     let mode = match app.pending_command {
@@ -224,16 +251,26 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
     let Some(tile) = app.snapshot.world.tile(pos) else {
         return Span::raw("  ");
     };
+    let overlay_bg = pheromone_overlay_bg(app, pos);
     match tile {
         Tile::Empty if pos.y == SURFACE_Y - 1 => {
-            Span::styled("  ", Style::default().bg(Color::Rgb(20, 45, 20)))
+            Span::styled("  ", Style::default().bg(overlay_bg.unwrap_or(Color::Rgb(20, 45, 20))))
         }
-        Tile::Empty => Span::raw("  "),
-        Tile::Dirt => Span::styled("▓▓", Style::default().fg(Color::Gray)),
-        Tile::Stone => Span::styled("██", Style::default().fg(Color::White)),
-        Tile::Resource => Span::styled("▒▒", Style::default().fg(Color::LightCyan)),
-        Tile::Food => Span::styled("&&", Style::default().fg(Color::Green)),
-        Tile::Bedrock => Span::styled("██", Style::default().fg(Color::DarkGray)),
+        Tile::Empty => Span::styled("  ", Style::default().bg(overlay_bg.unwrap_or(Color::Reset))),
+        Tile::Dirt => Span::styled("▓▓", base_tile_style(Color::Gray, overlay_bg)),
+        Tile::Stone => Span::styled("██", base_tile_style(Color::White, overlay_bg)),
+        Tile::Resource => Span::styled("▒▒", base_tile_style(Color::LightCyan, overlay_bg)),
+        Tile::Food => Span::styled("&&", base_tile_style(Color::Green, overlay_bg)),
+        Tile::Bedrock => Span::styled("██", base_tile_style(Color::DarkGray, overlay_bg)),
+    }
+}
+
+fn base_tile_style(fg: Color, bg: Option<Color>) -> Style {
+    let style = Style::default().fg(fg);
+    if let Some(bg) = bg {
+        style.bg(bg)
+    } else {
+        style
     }
 }
 
@@ -331,6 +368,24 @@ fn npc_color(app: &App, npc_hive_id: Option<u16>, kind: NpcKind) -> Color {
         NpcKind::Queen => Color::LightYellow,
         NpcKind::Egg => Color::LightMagenta,
     }
+}
+
+fn pheromone_overlay_bg(app: &App, pos: Position) -> Option<Color> {
+    let map = app.pheromone_map.as_ref()?;
+    if pos.x < 0 || pos.x >= map.width || pos.y < 0 || pos.y >= map.height {
+        return None;
+    }
+    let value = map.values[(pos.y * map.width + pos.x) as usize];
+    if value == 0 {
+        return None;
+    }
+    let intensity = value.min(24);
+    Some(match map.channel {
+        PheromoneChannel::Home => Color::Rgb(18, 20 + intensity * 3, 48 + intensity * 5),
+        PheromoneChannel::Food => Color::Rgb(20 + intensity * 4, 32 + intensity * 3, 20),
+        PheromoneChannel::Threat => Color::Rgb(48 + intensity * 5, 20, 20),
+        PheromoneChannel::Defense => Color::Rgb(22, 28, 42 + intensity * 5),
+    })
 }
 
 fn animated_player_glyph(app: &App) -> &'static str {
