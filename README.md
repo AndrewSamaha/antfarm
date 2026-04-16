@@ -1,3 +1,5 @@
+![TUI Screnshot](docs/img/screenshot.png)
+
 # Antfarm
 
 Cross-platform terminal ant colony game prototype in Rust.
