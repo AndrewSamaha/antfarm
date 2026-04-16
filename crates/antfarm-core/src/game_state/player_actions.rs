@@ -463,6 +463,7 @@ impl GameState {
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;

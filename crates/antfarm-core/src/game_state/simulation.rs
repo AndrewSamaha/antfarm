@@ -1,8 +1,8 @@
 use rand::Rng;
 use serde_json::{Value, json};
 
-const DEBUG_MAX_NON_QUEEN_NPCS_PER_HIVE: usize = 1;
 const QUEEN_DELIVERY_RADIUS: i32 = 5;
+const RECENT_POSITION_MEMORY_SIZE: usize = 5;
 
 use crate::{
     constants::{
@@ -123,8 +123,8 @@ impl GameState {
             let tile_bonus = match tile {
                 Some(Tile::Food) if !matches!(behavior, AntBehaviorState::ReturningFood) => 80_u32,
                 Some(Tile::Food) => 0_u32,
-                Some(Tile::Empty) => 8_u32,
-                Some(Tile::Dirt) | Some(Tile::Resource) => 4_u32,
+                Some(Tile::Empty) => 12_u32,
+                Some(Tile::Dirt) | Some(Tile::Resource) => 2_u32,
                 Some(Tile::Stone) | Some(Tile::Bedrock) | None => 0,
             };
             let queen_bias = match (behavior, queen_pos) {
@@ -146,6 +146,7 @@ impl GameState {
                 AntBehaviorState::ReturningFood => direction_bias(self.npcs[index].recent_home_dir, npc_pos, next),
                 AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
             });
+            let recent_position_penalty = recent_position_penalty(&self.npcs[index].recent_positions, next);
             raw_candidates.push((
                 next,
                 tile,
@@ -155,13 +156,14 @@ impl GameState {
                 tile_bonus,
                 queen_bias,
                 memory_bias,
+                recent_position_penalty,
             ));
         }
 
         let has_increasing_adjacent_food_signal = matches!(behavior, AntBehaviorState::Searching)
             && raw_candidates
                 .iter()
-                .any(|(_, _, food_pheromone, _, _, _, _, _)| *food_pheromone > current_food_pheromone);
+                .any(|(_, _, food_pheromone, _, _, _, _, _, _)| *food_pheromone > current_food_pheromone);
 
         let mut candidates = Vec::new();
         let mut candidate_logs = Vec::new();
@@ -174,6 +176,7 @@ impl GameState {
             tile_bonus,
             queen_bias,
             memory_bias,
+            recent_position_penalty,
         ) in raw_candidates
         {
             let pheromone_score = match behavior {
@@ -184,7 +187,13 @@ impl GameState {
                 AntBehaviorState::ReturningFood => home_pheromone,
                 AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
             };
+            let terrain_penalty = match (behavior, tile) {
+                (AntBehaviorState::ReturningFood, Some(Tile::Stone)) => 220_u32,
+                (AntBehaviorState::ReturningFood, Some(Tile::Bedrock)) => 260_u32,
+                _ => 0_u32,
+            };
             let score = pheromone_score + random_score + tile_bonus + queen_bias + memory_bias;
+            let score = score.saturating_sub(terrain_penalty + recent_position_penalty);
             candidates.push((score, next, tile));
             candidate_logs.push(json!({
                 "next": { "x": next.x, "y": next.y },
@@ -198,6 +207,8 @@ impl GameState {
                 "tile_bonus": tile_bonus,
                 "queen_bias": queen_bias,
                 "memory_bias": memory_bias,
+                "recent_position_penalty": recent_position_penalty,
+                "terrain_penalty": terrain_penalty,
                 "score": score,
             }));
         }
@@ -214,6 +225,7 @@ impl GameState {
                         self.npcs[index].carrying_food_ticks =
                             self.npcs[index].carrying_food_ticks.saturating_add(1);
                     }
+                    remember_recent_position(&mut self.npcs[index].recent_positions, next);
                     self.npcs_dirty = true;
                     outcome = "moved".to_string();
                     chosen_next = Some(next);
@@ -226,6 +238,7 @@ impl GameState {
                     self.npcs[index].behavior = AntBehaviorState::ReturningFood;
                     self.npcs[index].carrying_food_ticks = 0;
                     self.npcs[index].recent_home_memory_ticks = 0;
+                    self.npcs[index].recent_positions.clear();
                     self.npcs_dirty = true;
                     events.push(format!("NPC ant {} found food", npc_id));
                     self.push_npc_debug_event(crate::NpcDebugEvent {
@@ -271,6 +284,11 @@ impl GameState {
                     "home_ttl": self.npcs[index].recent_home_memory_ticks,
                     "food_dir": self.npcs[index].recent_food_dir.map(dir_name),
                     "food_ttl": self.npcs[index].recent_food_memory_ticks,
+                    "recent_positions": self.npcs[index]
+                        .recent_positions
+                        .iter()
+                        .map(|pos| json!({ "x": pos.x, "y": pos.y }))
+                        .collect::<Vec<_>>(),
                 },
                 "radius_sample": {
                     "home": home_axes.map(axes_json),
@@ -302,17 +320,6 @@ impl GameState {
         if self.npcs[index].food < QUEEN_EGG_FOOD_COST {
             return;
         }
-        if let Some(hive_id) = queen_hive_id {
-            let hive_non_queen_npcs = self
-                .npcs
-                .iter()
-                .filter(|npc| npc.hive_id == Some(hive_id) && npc.kind != NpcKind::Queen)
-                .count();
-            if hive_non_queen_npcs >= DEBUG_MAX_NON_QUEEN_NPCS_PER_HIVE {
-                return;
-            }
-        }
-
         let occupied: Vec<_> = self
             .players
             .values()
@@ -339,6 +346,7 @@ impl GameState {
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.npcs_dirty = true;
@@ -376,6 +384,7 @@ impl GameState {
         egg.recent_food_dir = None;
         egg.recent_home_memory_ticks = 0;
         egg.recent_food_memory_ticks = 0;
+        egg.recent_positions.clear();
         let hatched_id = egg.id;
         let hatched_hive_id = egg.hive_id;
         let hatched_pos = egg.pos;
@@ -425,6 +434,7 @@ impl GameState {
         self.npcs[worker_index].behavior = AntBehaviorState::Searching;
         self.npcs[worker_index].food = 0;
         self.npcs[worker_index].recent_food_memory_ticks = 0;
+        self.npcs[worker_index].recent_positions.clear();
         self.push_npc_debug_event(crate::NpcDebugEvent {
             tick: self.tick,
             npc_id: self.npcs[worker_index].id,
@@ -640,6 +650,34 @@ fn food_deposit_for_carry_ticks(carry_ticks: u16) -> u8 {
     WORKER_FOOD_DEPOSIT_PEAK
         .saturating_sub(decay)
         .max(WORKER_FOOD_DEPOSIT_FLOOR)
+}
+
+fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position) {
+    recent_positions.push(pos);
+    if recent_positions.len() > RECENT_POSITION_MEMORY_SIZE {
+        let extra = recent_positions.len() - RECENT_POSITION_MEMORY_SIZE;
+        recent_positions.drain(0..extra);
+    }
+}
+
+fn recent_position_penalty(recent_positions: &[Position], next: Position) -> u32 {
+    recent_positions
+        .iter()
+        .rev()
+        .enumerate()
+        .find_map(|(index, pos)| {
+            if *pos != next {
+                return None;
+            }
+            Some(match index {
+                0 => 160,
+                1 => 120,
+                2 => 80,
+                3 => 48,
+                _ => 24,
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn best_direction_for_axes((left, right, up, down): (u32, u32, u32, u32)) -> Option<MoveDir> {

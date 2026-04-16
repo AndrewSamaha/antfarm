@@ -26,6 +26,7 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
         },
         NpcAnt {
             id: 2,
@@ -45,6 +46,7 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
         },
     ]
 }
