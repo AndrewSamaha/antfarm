@@ -1,0 +1,10 @@
+/sc dig 20 12
+/sc dig 25 20
+/sc put food 3 3
+/sc dig 10 2
+/sc dig 20 1
+/sc dig 1 20
+/sc put food 4 4
+/sc save_gamestate "queen ready 2"
+/sc put food 4 4
+/sc put food 4 2

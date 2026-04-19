@@ -86,6 +86,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             Color::LightGreen
         }),
     ));
+    top.push(Span::styled(
+        format!("  tick={}", app.snapshot.tick),
+        Style::default().fg(Color::LightYellow),
+    ));
 
     if let Some(channel) = app.pheromone_overlay {
         let label = match channel {
