@@ -10,6 +10,16 @@ pub(crate) fn default_inventory() -> HashMap<String, u16> {
     ])
 }
 
+pub(crate) fn default_npc_inventory() -> HashMap<String, u16> {
+    HashMap::from([
+        ("dirt".to_string(), 0),
+        ("ore".to_string(), 0),
+        ("stone".to_string(), 0),
+        ("food".to_string(), 0),
+        ("queen".to_string(), 0),
+    ])
+}
+
 pub(crate) fn inventory_count(inventory: &HashMap<String, u16>, key: &str) -> u16 {
     inventory.get(key).copied().unwrap_or(0)
 }

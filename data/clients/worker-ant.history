@@ -8,3 +8,4 @@
 /sc save_gamestate "queen ready 2"
 /sc put food 4 4
 /sc put food 4 2
+/sc save_gamestate "big colony"

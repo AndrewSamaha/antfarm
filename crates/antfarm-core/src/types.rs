@@ -82,6 +82,8 @@ pub struct NpcAnt {
     pub id: u16,
     pub pos: Position,
     #[serde(default)]
+    pub inventory: HashMap<String, u16>,
+    #[serde(default)]
     pub kind: NpcKind,
     #[serde(default = "default_worker_health")]
     pub health: u16,

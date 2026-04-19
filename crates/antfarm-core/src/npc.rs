@@ -1,4 +1,5 @@
 use crate::{
+    inventory::default_npc_inventory,
     pheromones::AntBehaviorState,
     types::{NpcAnt, NpcKind, Position},
     world::World,
@@ -14,6 +15,7 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
                 x: 20,
                 y: surface_1.min(world.height() - 2),
             },
+            inventory: default_npc_inventory(),
             kind: NpcKind::Worker,
             health: NpcKind::Worker.max_health(),
             food: 0,
@@ -34,6 +36,7 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
                 x: 120,
                 y: surface_2.min(world.height() - 2),
             },
+            inventory: default_npc_inventory(),
             kind: NpcKind::Worker,
             health: NpcKind::Worker.max_health(),
             food: 0,

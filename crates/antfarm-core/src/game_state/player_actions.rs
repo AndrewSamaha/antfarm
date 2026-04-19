@@ -3,7 +3,7 @@ use crate::{
     pheromones::AntBehaviorState,
     constants::SURFACE_Y,
     constants::{MAX_PLAYERS, STONE_DIG_STEPS},
-    inventory::{add_inventory, default_inventory, inventory_count, remove_inventory},
+    inventory::{add_inventory, default_inventory, default_npc_inventory, inventory_count, remove_inventory},
     protocol::{Action, DigProgress, PlaceMaterial, PlacedArt, Snapshot},
     types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, Tile},
 };
@@ -451,6 +451,7 @@ impl GameState {
         self.npcs.push(NpcAnt {
             id: self.next_npc_id,
             pos: queen_pos,
+            inventory: default_npc_inventory(),
             kind: NpcKind::Queen,
             health: NpcKind::Queen.max_health(),
             food: queen_food.min(NpcKind::Queen.max_food()),

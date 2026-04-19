@@ -12,7 +12,7 @@ use crate::{
         WORKER_FOOD_DEPOSIT_DECAY_STEPS, WORKER_FOOD_DEPOSIT_FLOOR, WORKER_FOOD_DEPOSIT_PEAK,
         WORKER_HOME_DEPOSIT,
     },
-    inventory::remove_inventory,
+    inventory::{add_inventory, default_npc_inventory, remove_inventory},
     npc::nearest_open_tile,
     pheromones::{AntBehaviorState, PheromoneChannel},
     types::{MoveDir, NpcAnt, NpcKind, Position, Tile},
@@ -256,6 +256,11 @@ impl GameState {
                     break;
                 }
                 Some(Tile::Dirt) | Some(Tile::Resource) => {
+                    match tile {
+                        Some(Tile::Dirt) => add_inventory(&mut self.npcs[index].inventory, "dirt", 1),
+                        Some(Tile::Resource) => add_inventory(&mut self.npcs[index].inventory, "ore", 1),
+                        _ => {}
+                    }
                     self.set_world_tile(next, Tile::Empty);
                     events.push(format!(
                         "NPC ant {} tunneled at {},{}",
@@ -334,6 +339,7 @@ impl GameState {
         spawned_npcs.push(NpcAnt {
             id: self.next_npc_id,
             pos: egg_pos,
+            inventory: default_npc_inventory(),
             kind: NpcKind::Egg,
             health: NpcKind::Egg.max_health(),
             food: 0,
