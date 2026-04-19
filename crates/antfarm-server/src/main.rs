@@ -27,9 +27,32 @@ use crate::{
 
 const SERVER_ADDR: &str = "127.0.0.1:7000";
 
+fn print_help() {
+    println!(
+        "\
+antfarm-server
+
+Usage:
+  antfarm-server [OPTIONS]
+
+Options:
+  -h, --help                   Show this help text and exit
+      --reset-world            Delete the world database before startup
+      --paused                 Start the simulation in the paused state
+      --list-gamestates        List saved gamestate bookmarks and exit
+      --load-gamestate VALUE   Start from a saved gamestate by id or exact label
+"
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
+    let show_help = args.iter().any(|arg| arg == "-h" || arg == "--help");
+    if show_help {
+        print_help();
+        return Ok(());
+    }
     let reset_world = args.iter().any(|arg| arg == "--reset-world");
     let start_paused = args.iter().any(|arg| arg == "--paused");
     let list_gamestates = args.iter().any(|arg| arg == "--list-gamestates");
