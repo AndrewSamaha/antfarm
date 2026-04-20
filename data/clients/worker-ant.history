@@ -9,3 +9,6 @@
 /sc put food 4 4
 /sc put food 4 2
 /sc save_gamestate "big colony"
+/sc put dirt 10 10
+/sc give @e dirt 30
+/sc save_gamestate "big colony"

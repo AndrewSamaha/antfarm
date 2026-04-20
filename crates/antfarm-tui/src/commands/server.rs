@@ -99,7 +99,7 @@ pub(super) async fn submit_server_command(
         let resource = args.next().unwrap_or_default();
         let amount_raw = args.next().unwrap_or_default();
         if target.is_empty() || resource.is_empty() || amount_raw.is_empty() {
-            app.set_error("expected: /sc give <target|all> <resource> <amount>");
+            app.set_error("expected: /sc give <player-name|@a|@e> <resource> <amount>");
             return Ok(());
         }
         let amount = amount_raw
@@ -194,7 +194,7 @@ pub(super) async fn submit_server_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <target|all> <resource> <amount>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
         return Ok(());
     }
 

@@ -138,11 +138,33 @@ impl GameState {
 
         let mut granted = 0usize;
         match target {
-            "all" => {
+            "@a" => {
                 for player in self.players.values_mut() {
                     add_inventory(&mut player.inventory, resource_key, amount);
                     granted += 1;
                 }
+                if granted == 0 {
+                    return Err("no players matched target: @a".to_string());
+                }
+                self.players_dirty = true;
+                self.push_event(format!(
+                    "Granted {amount} {resource_key} to @a ({granted} players)"
+                ));
+                return Ok(());
+            }
+            "@e" => {
+                for npc in &mut self.npcs {
+                    add_inventory(&mut npc.inventory, resource_key, amount);
+                    granted += 1;
+                }
+                if granted == 0 {
+                    return Err("no NPCs matched target: @e".to_string());
+                }
+                self.npcs_dirty = true;
+                self.push_event(format!(
+                    "Granted {amount} {resource_key} to @e ({granted} NPCs)"
+                ));
+                return Ok(());
             }
             _ => {
                 for player in self.players.values_mut() {
