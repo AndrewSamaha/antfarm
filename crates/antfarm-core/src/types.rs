@@ -100,6 +100,8 @@ pub struct NpcAnt {
     #[serde(default)]
     pub carrying_food_ticks: u16,
     #[serde(default)]
+    pub home_trail_steps: Option<u16>,
+    #[serde(default)]
     pub recent_home_dir: Option<MoveDir>,
     #[serde(default)]
     pub recent_food_dir: Option<MoveDir>,
@@ -109,6 +111,8 @@ pub struct NpcAnt {
     pub recent_food_memory_ticks: u8,
     #[serde(default)]
     pub recent_positions: Vec<Position>,
+    #[serde(default)]
+    pub last_dirt_place_tick: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -3,6 +3,8 @@ use serde_json::{Value, json};
 
 const QUEEN_DELIVERY_RADIUS: i32 = 5;
 const RECENT_POSITION_MEMORY_SIZE: usize = 5;
+const QUEEN_NO_FILL_RADIUS: i32 = 8;
+const DIRT_PLACE_COOLDOWN_TICKS: u64 = 11;
 
 use crate::{
     constants::{
@@ -10,9 +12,9 @@ use crate::{
         PHEROMONE_DECAY_INTERVAL_TICKS, PHEROMONE_MEMORY_RADIUS, PHEROMONE_MEMORY_TICKS,
         QUEEN_EGG_FOOD_COST, QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS, SURFACE_Y,
         WORKER_FOOD_DEPOSIT_DECAY_STEPS, WORKER_FOOD_DEPOSIT_FLOOR, WORKER_FOOD_DEPOSIT_PEAK,
-        WORKER_HOME_DEPOSIT,
+        WORKER_HOME_DEPOSIT, WORKER_HOME_DEPOSIT_DECAY_STEPS,
     },
-    inventory::{add_inventory, default_npc_inventory, remove_inventory},
+    inventory::{add_inventory, default_npc_inventory, inventory_count, remove_inventory},
     npc::nearest_open_tile,
     pheromones::{AntBehaviorState, PheromoneChannel},
     types::{MoveDir, NpcAnt, NpcKind, Position, Tile},
@@ -77,10 +79,7 @@ impl GameState {
 
         if let Some(hive_id) = npc_hive {
             match behavior {
-                AntBehaviorState::Searching => {
-                    self.pheromones
-                        .deposit(npc_pos, hive_id, PheromoneChannel::Home, WORKER_HOME_DEPOSIT);
-                }
+                AntBehaviorState::Searching => {}
                 AntBehaviorState::ReturningFood => {
                     let deposit = food_deposit_for_carry_ticks(self.npcs[index].carrying_food_ticks);
                     self.pheromones
@@ -92,6 +91,11 @@ impl GameState {
                 }
                 AntBehaviorState::Defending | AntBehaviorState::Idle => {}
             }
+        }
+
+        if behavior == AntBehaviorState::Searching && self.try_place_dirt(index, queen_pos, events) {
+            self.npcs_dirty = true;
+            return;
         }
 
         let directions = [
@@ -221,6 +225,20 @@ impl GameState {
             match tile {
                 Some(Tile::Empty) => {
                     self.npcs[index].pos = next;
+                    if matches!(behavior, AntBehaviorState::Searching)
+                        && let (Some(hive_id), Some(home_trail_steps)) =
+                            (npc_hive, self.npcs[index].home_trail_steps)
+                    {
+                        let deposit = home_deposit_for_trail_steps(home_trail_steps);
+                        if deposit > 0 {
+                            self.pheromones
+                                .deposit(next, hive_id, PheromoneChannel::Home, deposit);
+                            self.npcs[index].home_trail_steps =
+                                Some(home_trail_steps.saturating_add(1));
+                        } else {
+                            self.npcs[index].home_trail_steps = None;
+                        }
+                    }
                     if matches!(behavior, AntBehaviorState::ReturningFood) {
                         self.npcs[index].carrying_food_ticks =
                             self.npcs[index].carrying_food_ticks.saturating_add(1);
@@ -237,6 +255,7 @@ impl GameState {
                     self.npcs[index].carrying_food = true;
                     self.npcs[index].behavior = AntBehaviorState::ReturningFood;
                     self.npcs[index].carrying_food_ticks = 0;
+                    self.npcs[index].home_trail_steps = None;
                     self.npcs[index].recent_home_memory_ticks = 0;
                     self.npcs[index].recent_positions.clear();
                     self.npcs_dirty = true;
@@ -284,6 +303,7 @@ impl GameState {
                 "behavior": behavior_name(behavior),
                 "carrying_food": self.npcs[index].carrying_food,
                 "carrying_food_ticks": self.npcs[index].carrying_food_ticks,
+                "home_trail_steps": self.npcs[index].home_trail_steps,
                 "memory": {
                     "home_dir": self.npcs[index].recent_home_dir.map(dir_name),
                     "home_ttl": self.npcs[index].recent_home_memory_ticks,
@@ -348,11 +368,13 @@ impl GameState {
             behavior: AntBehaviorState::Idle,
             carrying_food: false,
             carrying_food_ticks: 0,
+            home_trail_steps: None,
             recent_home_dir: None,
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            last_dirt_place_tick: None,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.npcs_dirty = true;
@@ -386,6 +408,7 @@ impl GameState {
         egg.behavior = AntBehaviorState::Searching;
         egg.carrying_food = false;
         egg.carrying_food_ticks = 0;
+        egg.home_trail_steps = Some(0);
         egg.recent_home_dir = None;
         egg.recent_food_dir = None;
         egg.recent_home_memory_ticks = 0;
@@ -416,6 +439,160 @@ impl GameState {
             .any(|(index, npc)| Some(index) != ignore_index && npc.pos == pos)
     }
 
+    fn try_place_dirt(
+        &mut self,
+        index: usize,
+        queen_pos: Option<Position>,
+        events: &mut Vec<String>,
+    ) -> bool {
+        if self.npcs[index].carrying_food || inventory_count(&self.npcs[index].inventory, "dirt") == 0 {
+            return false;
+        }
+        if let Some(last_tick) = self.npcs[index].last_dirt_place_tick
+            && self.tick.saturating_sub(last_tick) < DIRT_PLACE_COOLDOWN_TICKS
+        {
+            return false;
+        }
+
+        let Some(hive_id) = self.npcs[index].hive_id else {
+            return false;
+        };
+        let Some(queen_pos) = queen_pos else {
+            return false;
+        };
+        let npc_pos = self.npcs[index].pos;
+        let queen_distance = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
+        if queen_distance <= QUEEN_NO_FILL_RADIUS {
+            return false;
+        }
+
+        let candidates = [
+            npc_pos.offset(-1, 0),
+            npc_pos.offset(1, 0),
+            npc_pos.offset(0, 1),
+            npc_pos.offset(0, -1),
+        ];
+        let mut best_target = None;
+        let mut best_score = i32::MIN;
+
+        for target in candidates {
+            if !self.can_place_dirt_at(index, hive_id, target) {
+                continue;
+            }
+            let solid_neighbors = self.solid_neighbor_count(target);
+            if solid_neighbors > best_score {
+                best_score = solid_neighbors;
+                best_target = Some(target);
+            }
+        }
+
+        let Some(target) = best_target else {
+            return false;
+        };
+
+        if !remove_inventory(&mut self.npcs[index].inventory, "dirt", 1) {
+            return false;
+        }
+
+        self.set_world_tile(target, Tile::Dirt);
+        self.npcs[index].last_dirt_place_tick = Some(self.tick);
+        let npc_id = self.npcs[index].id;
+        events.push(format!("NPC ant {} placed dirt at {},{}", npc_id, target.x, target.y));
+        self.push_npc_debug_event(crate::NpcDebugEvent {
+            tick: self.tick,
+            npc_id,
+            hive_id: Some(hive_id),
+            event_type: "placed_dirt".to_string(),
+            pos: self.npcs[index].pos,
+            details: json!({
+                "target": { "x": target.x, "y": target.y },
+                "remaining_dirt": inventory_count(&self.npcs[index].inventory, "dirt"),
+                "last_dirt_place_tick": self.npcs[index].last_dirt_place_tick,
+            }),
+        });
+        true
+    }
+
+    fn can_place_dirt_at(&self, index: usize, hive_id: u16, target: Position) -> bool {
+        if !self.world.in_bounds(target) {
+            return false;
+        }
+        if self.world.tile(target) != Some(Tile::Empty) {
+            return false;
+        }
+        if self.npc_occupied(target, Some(index))
+            || self.players.values().any(|player| player.pos == target)
+            || self.art_occupies_cell(target)
+        {
+            return false;
+        }
+        if !self.pheromone_clear_for_fill(target, hive_id) {
+            return false;
+        }
+        if self.solid_neighbor_count(target) < 3 {
+            return false;
+        }
+        if self.open_cardinal_neighbor_count(target, Some(index)) < 2 {
+            return false;
+        }
+        true
+    }
+
+    fn pheromone_clear_for_fill(&self, target: Position, hive_id: u16) -> bool {
+        let positions = [
+            target,
+            target.offset(-1, 0),
+            target.offset(1, 0),
+            target.offset(0, 1),
+            target.offset(0, -1),
+        ];
+        positions.into_iter().all(|pos| {
+            !self.world.in_bounds(pos)
+                || (self.pheromones.value(pos, hive_id, PheromoneChannel::Home) == 0
+                    && self.pheromones.value(pos, hive_id, PheromoneChannel::Food) == 0)
+        })
+    }
+
+    fn solid_neighbor_count(&self, target: Position) -> i32 {
+        let mut solids = 0;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let pos = target.offset(dx, dy);
+                if !self.world.in_bounds(pos) {
+                    continue;
+                }
+                if matches!(
+                    self.world.tile(pos),
+                    Some(Tile::Dirt | Tile::Stone | Tile::Bedrock | Tile::Resource)
+                ) {
+                    solids += 1;
+                }
+            }
+        }
+        solids
+    }
+
+    fn open_cardinal_neighbor_count(&self, target: Position, ignore_index: Option<usize>) -> i32 {
+        [
+            target.offset(-1, 0),
+            target.offset(1, 0),
+            target.offset(0, 1),
+            target.offset(0, -1),
+        ]
+        .into_iter()
+        .filter(|pos| {
+            self.world.in_bounds(*pos)
+                && self.world.tile(*pos) == Some(Tile::Empty)
+                && !self.players.values().any(|player| player.pos == *pos)
+                && !self.npc_occupied(*pos, ignore_index)
+                && !self.art_occupies_cell(*pos)
+        })
+        .count() as i32
+    }
+
     fn try_deliver_food_to_queen(&mut self, worker_index: usize) -> bool {
         let Some(hive_id) = self.npcs[worker_index].hive_id else {
             return false;
@@ -439,6 +616,7 @@ impl GameState {
         self.npcs[worker_index].carrying_food_ticks = 0;
         self.npcs[worker_index].behavior = AntBehaviorState::Searching;
         self.npcs[worker_index].food = 0;
+        self.npcs[worker_index].home_trail_steps = Some(0);
         self.npcs[worker_index].recent_food_memory_ticks = 0;
         self.npcs[worker_index].recent_positions.clear();
         self.push_npc_debug_event(crate::NpcDebugEvent {
@@ -656,6 +834,11 @@ fn food_deposit_for_carry_ticks(carry_ticks: u16) -> u8 {
     WORKER_FOOD_DEPOSIT_PEAK
         .saturating_sub(decay)
         .max(WORKER_FOOD_DEPOSIT_FLOOR)
+}
+
+fn home_deposit_for_trail_steps(trail_steps: u16) -> u8 {
+    let decay = (trail_steps / WORKER_HOME_DEPOSIT_DECAY_STEPS) as u8;
+    WORKER_HOME_DEPOSIT.saturating_sub(decay)
 }
 
 fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position) {

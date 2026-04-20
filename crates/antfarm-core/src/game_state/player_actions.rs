@@ -482,11 +482,13 @@ impl GameState {
             behavior: AntBehaviorState::Idle,
             carrying_food: false,
             carrying_food_ticks: 0,
+            home_trail_steps: None,
             recent_home_dir: None,
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            last_dirt_place_tick: None,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;

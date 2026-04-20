@@ -24,11 +24,13 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
             behavior: AntBehaviorState::Searching,
             carrying_food: false,
             carrying_food_ticks: 0,
+            home_trail_steps: None,
             recent_home_dir: None,
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            last_dirt_place_tick: None,
         },
         NpcAnt {
             id: 2,
@@ -45,11 +47,13 @@ pub(crate) fn default_npcs(world: &World) -> Vec<NpcAnt> {
             behavior: AntBehaviorState::Searching,
             carrying_food: false,
             carrying_food_ticks: 0,
+            home_trail_steps: None,
             recent_home_dir: None,
             recent_food_dir: None,
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            last_dirt_place_tick: None,
         },
     ]
 }
