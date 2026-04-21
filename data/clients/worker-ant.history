@@ -33,3 +33,10 @@
 /sc give @s f 100
 /sc give @a food 100
 /sc give @a q 1
+/sc put food 5 5
+/sc give @a q 1
+/help
+/sc give @a q 1
+/sc give @a food 50
+/sc debug.npc start
+/sc debug.npc stop

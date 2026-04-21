@@ -279,6 +279,10 @@ impl GameState {
                 Some(Tile::Food) if !matches!(behavior, AntBehaviorState::ReturningFood) => {
                     self.set_world_tile(next, Tile::Empty);
                     self.npcs[index].pos = next;
+                    let lifespan_bonus =
+                        worker_lifespan_bonus(self.npcs[index].age_ticks, NPC_WORKER_LIFESPAN_TICKS);
+                    self.npcs[index].age_ticks =
+                        self.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
                     self.npcs[index].carrying_food = true;
                     self.npcs[index].behavior = AntBehaviorState::ReturningFood;
                     self.npcs[index].carrying_food_ticks = 0;
@@ -295,6 +299,8 @@ impl GameState {
                         pos: next,
                         details: json!({
                             "behavior_before": behavior_name(behavior),
+                            "lifespan_bonus": lifespan_bonus,
+                            "age_ticks": self.npcs[index].age_ticks,
                         }),
                     });
                     outcome = "picked_up_food".to_string();
@@ -866,6 +872,14 @@ fn food_deposit_for_carry_ticks(carry_ticks: u16) -> u8 {
 fn home_deposit_for_trail_steps(trail_steps: u16) -> u8 {
     let decay = (trail_steps / WORKER_HOME_DEPOSIT_DECAY_STEPS) as u8;
     WORKER_HOME_DEPOSIT.saturating_sub(decay)
+}
+
+fn worker_lifespan_bonus(age_ticks: u16, default_max_life_span: u16) -> u16 {
+    if default_max_life_span == 0 {
+        return 0;
+    }
+    let remaining = default_max_life_span.saturating_sub(age_ticks) as u32;
+    ((remaining * 200) / u32::from(default_max_life_span)) as u16
 }
 
 fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position) {
