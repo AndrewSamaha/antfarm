@@ -41,6 +41,29 @@ pub(super) async fn submit_server_command(
         return Ok(());
     }
 
+    if let Some(raw_selector) = trimmed.strip_prefix("/sc delete_gamestate ") {
+        let selector = trim_wrapped_quotes(raw_selector.trim());
+        if selector.is_empty() {
+            app.set_error("expected: /sc delete_gamestate <id|label>");
+            return Ok(());
+        }
+        send_message(
+            writer,
+            ClientMessage::DeleteGameState {
+                selector: selector.to_string(),
+            },
+        )
+        .await?;
+        app.clear_status();
+        return Ok(());
+    }
+
+    if trimmed == "/sc delete_all_gamestates" {
+        send_message(writer, ClientMessage::DeleteAllGameStates).await?;
+        app.clear_status();
+        return Ok(());
+    }
+
     if let Some(raw_selector) = trimmed.strip_prefix("/sc load_gamestate ") {
         let selector = trim_wrapped_quotes(raw_selector.trim());
         if selector.is_empty() {
@@ -194,7 +217,7 @@ pub(super) async fn submit_server_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
         return Ok(());
     }
 

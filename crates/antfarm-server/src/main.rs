@@ -11,7 +11,6 @@ use serde_json::json;
 use std::{
     env,
     collections::HashMap,
-    fs,
     path::PathBuf,
     sync::Arc,
 };
@@ -20,7 +19,10 @@ use tokio::{net::TcpListener, sync::Mutex};
 use crate::{
     client_session::{SNAPSHOT_DB_PATH, handle_client},
     logging::{emit_log, world_log_fields},
-    persistence::{list_named_gamestates, load_startup_game, spawn_persistence_worker},
+    persistence::{
+        delete_all_named_gamestates, delete_named_gamestate, list_named_gamestates,
+        load_startup_game, reset_world_state_preserve_gamestates, spawn_persistence_worker,
+    },
     runtime::spawn_background_tasks,
     server_state::ServerState,
 };
@@ -36,11 +38,13 @@ Usage:
   antfarm-server [OPTIONS]
 
 Options:
-  -h, --help                   Show this help text and exit
-      --reset-world            Delete the world database before startup
+      -h, --help                   Show this help text and exit
+      --reset-world            Clear live world snapshots and player profiles before startup
       --paused                 Start the simulation in the paused state
       --list-gamestates        List saved gamestate bookmarks and exit
       --load-gamestate VALUE   Start from a saved gamestate by id or exact label
+      --delete-gamestate VALUE Delete a saved gamestate by id or exact label and exit
+      --delete-all-gamestates  Delete all saved gamestates and exit
 "
     );
 }
@@ -56,15 +60,27 @@ async fn main() -> Result<()> {
     let reset_world = args.iter().any(|arg| arg == "--reset-world");
     let start_paused = args.iter().any(|arg| arg == "--paused");
     let list_gamestates = args.iter().any(|arg| arg == "--list-gamestates");
+    let delete_all_gamestates = args.iter().any(|arg| arg == "--delete-all-gamestates");
     let mut load_gamestate = None;
+    let mut delete_gamestate = None;
     let mut index = 0;
     while index < args.len() {
-        if args[index] == "--load-gamestate" {
-            let selector = args
-                .get(index + 1)
-                .ok_or_else(|| anyhow::anyhow!("--load-gamestate requires an id or exact label"))?;
-            load_gamestate = Some(selector.clone());
-            index += 1;
+        match args[index].as_str() {
+            "--load-gamestate" => {
+                let selector = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--load-gamestate requires an id or exact label"))?;
+                load_gamestate = Some(selector.clone());
+                index += 1;
+            }
+            "--delete-gamestate" => {
+                let selector = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--delete-gamestate requires an id or exact label"))?;
+                delete_gamestate = Some(selector.clone());
+                index += 1;
+            }
+            _ => {}
         }
         index += 1;
     }
@@ -78,6 +94,8 @@ async fn main() -> Result<()> {
             "start_paused": start_paused,
             "list_gamestates": list_gamestates,
             "load_gamestate": load_gamestate,
+            "delete_gamestate": delete_gamestate,
+            "delete_all_gamestates": delete_all_gamestates,
         }),
     );
     if list_gamestates {
@@ -90,12 +108,23 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
-    if reset_world && snapshot_path.exists() {
-        fs::remove_file(&snapshot_path)?;
+    if let Some(selector) = delete_gamestate {
+        let deleted = delete_named_gamestate(&snapshot_path, &selector)?;
+        println!("deleted_gamestates={deleted}");
+        return Ok(());
+    }
+    if delete_all_gamestates {
+        let deleted = delete_all_named_gamestates(&snapshot_path)?;
+        println!("deleted_gamestates={deleted}");
+        return Ok(());
+    }
+    if reset_world {
+        reset_world_state_preserve_gamestates(&snapshot_path)?;
         emit_log(
-            "world_db_deleted",
+            "world_state_reset",
             json!({
                 "snapshot_db": snapshot_path.display().to_string(),
+                "preserved_named_gamestates": true,
             }),
         );
     }

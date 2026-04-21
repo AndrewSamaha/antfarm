@@ -59,6 +59,10 @@ pub enum ClientMessage {
         label: String,
     },
     ListGameStates,
+    DeleteGameState {
+        selector: String,
+    },
+    DeleteAllGameStates,
     LoadGameState {
         selector: String,
     },

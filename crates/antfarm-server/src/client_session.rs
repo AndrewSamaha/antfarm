@@ -11,7 +11,8 @@ use crate::{
     debug_npc::{start_npc_debug_session, stop_npc_debug_session},
     logging::{emit_log, world_log_fields},
     persistence::{
-        list_named_gamestates, load_named_gamestate, load_player_profile, save_named_gamestate,
+        delete_all_named_gamestates, delete_named_gamestate, list_named_gamestates,
+        load_named_gamestate, load_player_profile, save_named_gamestate,
     },
     server_state::{PersistMessage, ServerState},
     sync::{broadcast_full_sync, broadcast_patch, send_full_sync},
@@ -36,9 +37,10 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
         Ok::<(), anyhow::Error>(())
     });
 
-    while let Some(line) = lines.next_line().await? {
-        let message: ClientMessage = serde_json::from_str(&line)?;
-        match message {
+    let result: Result<()> = async {
+        while let Some(line) = lines.next_line().await? {
+            let message: ClientMessage = serde_json::from_str(&line)?;
+            match message {
             ClientMessage::Join { name, token } => {
                 if player_id.is_some() {
                     continue;
@@ -340,6 +342,60 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                 let _ = state.persistence_tx.send(PersistMessage::Save(snapshot.clone()));
                 broadcast_full_sync(&state, &snapshot).await?;
             }
+            ClientMessage::DeleteGameState { selector } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before deleting game state".to_string(),
+                    })?;
+                    continue;
+                };
+                let selector = selector.trim();
+                if selector.is_empty() {
+                    tx.send(ServerMessage::Error {
+                        message: "delete_gamestate requires an id or exact label".to_string(),
+                    })?;
+                    continue;
+                }
+                let deleted = delete_named_gamestate(Path::new(SNAPSHOT_DB_PATH), selector)?;
+                if deleted == 0 {
+                    tx.send(ServerMessage::Error {
+                        message: format!("no saved game state matched: {selector}"),
+                    })?;
+                    continue;
+                }
+                emit_log(
+                    "sc_delete_gamestate",
+                    json!({ "selector": selector, "deleted": deleted }),
+                );
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    game.push_server_event(format!(
+                        "Deleted {deleted} saved game state(s): {selector}"
+                    ));
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::DeleteAllGameStates => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before deleting game states".to_string(),
+                    })?;
+                    continue;
+                };
+                let deleted = delete_all_named_gamestates(Path::new(SNAPSHOT_DB_PATH))?;
+                emit_log("sc_delete_all_gamestates", json!({ "deleted": deleted }));
+                let maybe_patch = {
+                    let mut game = state.game.lock().await;
+                    game.push_server_event(format!("Deleted {deleted} saved game state(s)"));
+                    game.take_patch()
+                };
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
             ClientMessage::SetSimulationPaused { paused } => {
                 let Some(_id) = player_id else {
                     tx.send(ServerMessage::Error {
@@ -463,7 +519,10 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                 }
             }
         }
+        }
+        Ok(())
     }
+    .await;
 
     if let Some(id) = player_id {
         state.clients.lock().await.remove(&id);
@@ -494,5 +553,5 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
     }
 
     writer_task.abort();
-    Ok(())
+    result
 }

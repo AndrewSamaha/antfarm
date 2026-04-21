@@ -166,6 +166,46 @@ pub(crate) fn load_named_gamestate(path: &Path, selector: &str) -> Result<Option
         .map_err(Into::into)
 }
 
+pub(crate) fn reset_world_state_preserve_gamestates(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let connection = open_db(path)?;
+    connection.execute("DELETE FROM world_snapshots", [])?;
+    connection.execute("DELETE FROM player_profiles", [])?;
+    Ok(())
+}
+
+pub(crate) fn delete_named_gamestate(path: &Path, selector: &str) -> Result<usize> {
+    let connection = open_db(path)?;
+    let deleted = if let Ok(id) = selector.parse::<i64>() {
+        connection.execute(
+            "DELETE FROM named_gamestates WHERE id = ?1",
+            params![id],
+        )?
+    } else {
+        connection.execute(
+            "
+            DELETE FROM named_gamestates
+            WHERE id = (
+                SELECT id
+                FROM named_gamestates
+                WHERE label = ?1
+                ORDER BY id DESC
+                LIMIT 1
+            )
+            ",
+            params![selector],
+        )?
+    };
+    Ok(deleted)
+}
+
+pub(crate) fn delete_all_named_gamestates(path: &Path) -> Result<usize> {
+    let connection = open_db(path)?;
+    Ok(connection.execute("DELETE FROM named_gamestates", [])?)
+}
+
 fn persistence_worker_loop(path: PathBuf, rx: mpsc::Receiver<PersistMessage>) -> Result<()> {
     let connection = open_db(&path)?;
     for message in rx {

@@ -13,3 +13,23 @@
 /sc give @e dirt 30
 /sc save_gamestate "big colony"
 /sc give @e dirt 30
+/sc give @e dirt 10
+/sc dig 20 5
+/sc dig 28 5
+/sc dig 20 5
+/sc dig 28 5
+/sc dig 24 6
+/sc dig 22 6
+/sc put food 5 5
+/sc save_gamestate "empty hive"
+/sc put food 5 5
+/sc save_gamestate "empty hive"
+/sc give @a q 1
+/sc load_gamestate 2
+/sc give @a food 10
+/sc give @a q 1
+/sc give @s f 100
+/sc give @a q 1
+/sc give @s f 100
+/sc give @a food 100
+/sc give @a q 1

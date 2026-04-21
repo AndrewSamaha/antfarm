@@ -42,6 +42,8 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("/sc show_params"),
         Line::from("/sc save_gamestate \"queen is ready\""),
         Line::from("/sc list_gamestates"),
+        Line::from("/sc delete_gamestate 1"),
+        Line::from("/sc delete_all_gamestates"),
         Line::from("/sc load_gamestate 1"),
         Line::from("/sc game pause"),
         Line::from("/sc game unpause"),

@@ -8,7 +8,8 @@ const DIRT_PLACE_COOLDOWN_TICKS: u64 = 11;
 
 use crate::{
     constants::{
-        DEFAULT_SOIL_SETTLE_FREQUENCY, EGG_HATCH_TICKS, PHEROMONE_DECAY_AMOUNT,
+        DEFAULT_SOIL_SETTLE_FREQUENCY, EGG_HATCH_TICKS, NPC_WORKER_LIFESPAN_TICKS,
+        PHEROMONE_DECAY_AMOUNT,
         PHEROMONE_DECAY_INTERVAL_TICKS, PHEROMONE_MEMORY_RADIUS, PHEROMONE_MEMORY_TICKS,
         QUEEN_EGG_FOOD_COST, QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS, SURFACE_Y,
         WORKER_FOOD_DEPOSIT_DECAY_STEPS, WORKER_FOOD_DEPOSIT_FLOOR, WORKER_FOOD_DEPOSIT_PEAK,
@@ -39,6 +40,11 @@ impl GameState {
                 NpcKind::Egg => self.tick_egg(index, &mut events),
             }
         }
+        let before_retain = self.npcs.len();
+        self.npcs.retain(|npc| npc.health > 0);
+        if self.npcs.len() != before_retain {
+            self.npcs_dirty = true;
+        }
         if !spawned_npcs.is_empty() {
             self.npcs.extend(spawned_npcs);
             self.npcs_dirty = true;
@@ -59,6 +65,27 @@ impl GameState {
     }
 
     fn tick_worker(&mut self, index: usize, events: &mut Vec<String>) {
+        if self.npcs[index].hive_id.is_some() {
+            self.npcs[index].age_ticks = self.npcs[index].age_ticks.saturating_add(1);
+            if self.npcs[index].age_ticks >= NPC_WORKER_LIFESPAN_TICKS {
+                let npc_id = self.npcs[index].id;
+                let npc_hive = self.npcs[index].hive_id;
+                let npc_pos = self.npcs[index].pos;
+                self.npcs[index].health = 0;
+                self.push_npc_debug_event(crate::NpcDebugEvent {
+                    tick: self.tick,
+                    npc_id,
+                    hive_id: npc_hive,
+                    event_type: "died_of_old_age".to_string(),
+                    pos: npc_pos,
+                    details: json!({
+                        "age_ticks": self.npcs[index].age_ticks,
+                    }),
+                });
+                events.push(format!("NPC ant {} died of old age", npc_id));
+                return;
+            }
+        }
         self.tick_worker_memory(index);
         let npc_pos = self.npcs[index].pos;
         let npc_id = self.npcs[index].id;

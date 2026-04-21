@@ -3,7 +3,8 @@ use crate::{
     modals::{centered_rect, draw_help_modal, draw_params_modal, draw_sync_modal},
 };
 use antfarm_core::{
-    MoveDir, NpcKind, PheromoneChannel, PlaceMaterial, Position, SURFACE_Y, Tile, Viewport,
+    DAY_TICKS, MoveDir, NpcKind, PheromoneChannel, PlaceMaterial, Position, SURFACE_Y, Tile,
+    Viewport,
     find_ascii_art_asset,
 };
 use ratatui::{
@@ -87,7 +88,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         }),
     ));
     top.push(Span::styled(
-        format!("  tick={}", app.snapshot.tick),
+        format!(
+            "  day={} tick={}",
+            app.snapshot.tick / DAY_TICKS + 1,
+            app.snapshot.tick
+        ),
         Style::default().fg(Color::LightYellow),
     ));
 
