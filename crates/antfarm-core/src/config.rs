@@ -2,7 +2,8 @@ use serde_json::{Map, Value, json};
 
 use crate::constants::{
     DEFAULT_SOIL_SETTLE_FREQUENCY, DEFAULT_WORLD_MAX_DEPTH,
-    DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, DEFAULT_WORLD_SEED,
+    DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, DEFAULT_WORLD_SEED, EGG_HATCH_TICKS,
+    NPC_WORKER_LIFESPAN_TICKS, QUEEN_EGG_FOOD_COST,
 };
 
 pub fn default_server_config() -> Value {
@@ -19,6 +20,16 @@ fn default_config() -> Value {
     json!({
         "soil": {
             "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY
+        },
+        "colony": {
+            "ambient_worker_count": 2,
+            "worker_lifespan_ticks": NPC_WORKER_LIFESPAN_TICKS,
+            "queen_egg_food_cost": QUEEN_EGG_FOOD_COST,
+            "egg_hatch_ticks": EGG_HATCH_TICKS,
+            "queen_delivery_radius": 5,
+            "queen_no_fill_radius": 8,
+            "dirt_place_cooldown_ticks": 11,
+            "max_workers_per_hive": 0
         },
         "world": {
             "seed": DEFAULT_WORLD_SEED,
@@ -157,6 +168,26 @@ pub fn config_u64(root: &Value, path: &str, default: u64) -> u64 {
         current = next;
     }
     current.as_u64().unwrap_or(default)
+}
+
+pub fn config_u16(root: &Value, path: &str, default: u16) -> u16 {
+    let mut current = root;
+    for segment in path.split('.').filter(|segment| !segment.trim().is_empty()) {
+        let Some(next) = current.get(segment) else {
+            return default;
+        };
+        current = next;
+    }
+    current
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(default)
+}
+
+pub fn merge_config(base: Value, incoming: Value) -> Value {
+    let mut merged = base;
+    merge_config_value(&mut merged, migrate_legacy_config(incoming));
+    merged
 }
 
 fn merge_config_value(target: &mut Value, incoming: Value) {

@@ -182,6 +182,50 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     broadcast_patch(&state, &patch, None).await?;
                 }
             }
+            ClientMessage::FeedQueens { amount } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before feeding queens".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let (maybe_patch, snapshot) = {
+                    let mut game = state.game.lock().await;
+                    game.feed_queens(amount).map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
+                };
+
+                emit_log("sc_feed_queens", json!({ "amount": amount }));
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
+            ClientMessage::Kill { selector } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before killing NPCs".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let (maybe_patch, snapshot) = {
+                    let mut game = state.game.lock().await;
+                    game.kill_by_selector(&selector).map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
+                };
+
+                emit_log("sc_kill", json!({ "selector": selector }));
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
             ClientMessage::DigArea { width, height } => {
                 let Some(id) = player_id else {
                     tx.send(ServerMessage::Error {

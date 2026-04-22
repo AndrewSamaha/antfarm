@@ -187,6 +187,42 @@ impl GameState {
         Ok(())
     }
 
+    pub fn feed_queens(&mut self, amount: u16) -> Result<(), String> {
+        if amount == 0 {
+            return Err("feed amount must be greater than zero".to_string());
+        }
+
+        let mut fed = 0usize;
+        for npc in &mut self.npcs {
+            if npc.kind != NpcKind::Queen {
+                continue;
+            }
+            npc.food = npc.food.saturating_add(amount).min(NpcKind::Queen.max_food());
+            fed += 1;
+        }
+
+        if fed == 0 {
+            return Err("no queens available to feed".to_string());
+        }
+
+        self.npcs_dirty = true;
+        self.push_event(format!("Fed {fed} queen(s) with {amount} food"));
+        Ok(())
+    }
+
+    pub fn kill_by_selector(&mut self, selector: &str) -> Result<(), String> {
+        let parsed = parse_npc_selector(selector)?;
+        let before = self.npcs.len();
+        self.npcs.retain(|npc| !parsed.matches(npc));
+        let killed = before.saturating_sub(self.npcs.len());
+        if killed == 0 {
+            return Err(format!("no NPCs matched selector: {selector}"));
+        }
+        self.npcs_dirty = true;
+        self.push_event(format!("Killed {killed} NPC(s) matching {selector}"));
+        Ok(())
+    }
+
     pub fn add_player(
         &mut self,
         name: String,
@@ -559,6 +595,74 @@ fn normalize_resource_key(resource: &str) -> Option<&'static str> {
         "q" | "queen" => Some("queen"),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NpcSelector {
+    kind: Option<NpcKind>,
+    hive: Option<Option<u16>>,
+}
+
+impl NpcSelector {
+    fn matches(self, npc: &NpcAnt) -> bool {
+        if let Some(kind) = self.kind
+            && npc.kind != kind
+        {
+            return false;
+        }
+        if let Some(hive) = self.hive
+            && npc.hive_id != hive
+        {
+            return false;
+        }
+        true
+    }
+}
+
+fn parse_npc_selector(selector: &str) -> Result<NpcSelector, String> {
+    let trimmed = selector.trim();
+    if trimmed == "@e" {
+        return Ok(NpcSelector {
+            kind: None,
+            hive: None,
+        });
+    }
+    let Some(rest) = trimmed.strip_prefix("@e[") else {
+        return Err("expected selector like @e or @e[type=worker,hive=none]".to_string());
+    };
+    let Some(inner) = rest.strip_suffix(']') else {
+        return Err("selector must end with ']'".to_string());
+    };
+    let mut parsed = NpcSelector {
+        kind: None,
+        hive: None,
+    };
+    for raw_filter in inner.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((key, value)) = raw_filter.split_once('=') else {
+            return Err(format!("invalid selector filter: {raw_filter}"));
+        };
+        match key.trim() {
+            "type" | "kind" => {
+                parsed.kind = Some(match value.trim() {
+                    "worker" => NpcKind::Worker,
+                    "queen" => NpcKind::Queen,
+                    "egg" => NpcKind::Egg,
+                    other => return Err(format!("unknown NPC type: {other}")),
+                });
+            }
+            "hive" => {
+                parsed.hive = Some(match value.trim() {
+                    "none" => None,
+                    raw => Some(
+                        raw.parse::<u16>()
+                            .map_err(|_| format!("invalid hive selector: {raw}"))?,
+                    ),
+                });
+            }
+            other => return Err(format!("unsupported selector key: {other}")),
+        }
+    }
+    Ok(parsed)
 }
 
 fn put_resource_tile(resource: &str) -> Option<Tile> {

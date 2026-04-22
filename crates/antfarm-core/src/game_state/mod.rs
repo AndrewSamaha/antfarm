@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use crate::{
     art::find_ascii_art_asset,
     config::{
-        config_f64, config_u64, default_server_config, merge_with_default_config, set_config_path,
+        config_f64, config_u16, config_u64, default_server_config, merge_with_default_config,
+        set_config_path,
     },
     constants::{
         DEFAULT_WORLD_SEED, DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, WORLD_WIDTH,
     },
     inventory::default_inventory,
-    npc::default_npcs,
+    npc::default_npcs_with_count,
     npc_debug::NpcDebugEvent,
     pheromones::{PheromoneChannel, PheromoneGrid, PheromoneMap},
     protocol::{DigProgress, PatchFrame, PlacedArt, Snapshot, TileUpdate},
@@ -33,6 +34,10 @@ pub struct GameState {
     pub event_log: Vec<String>,
     pub config: Value,
     pub simulation_paused: bool,
+    pub found_food_count: u64,
+    pub delivered_food_count: u64,
+    pub egg_laid_count: u64,
+    pub egg_hatched_count: u64,
     npc_debug_enabled: bool,
     npc_debug_events: Vec<NpcDebugEvent>,
     dig_progress: HashMap<u8, DigProgress>,
@@ -59,10 +64,13 @@ impl GameState {
         let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
         let world = World::generate(seed, WORLD_WIDTH, &config);
         let pheromones = PheromoneGrid::empty(world.width(), world.height());
+        let ambient_worker_count = config_u16(&config, "colony.ambient_worker_count", 2);
+        let npcs = default_npcs_with_count(&world, ambient_worker_count);
+        let next_npc_id = ambient_worker_count.saturating_add(1);
 
         Self {
             tick: 0,
-            npcs: default_npcs(&world),
+            npcs,
             world,
             pheromones,
             players: HashMap::new(),
@@ -70,6 +78,10 @@ impl GameState {
             placed_art: Vec::new(),
             config,
             simulation_paused: false,
+            found_food_count: 0,
+            delivered_food_count: 0,
+            egg_laid_count: 0,
+            egg_hatched_count: 0,
             npc_debug_enabled: false,
             npc_debug_events: Vec::new(),
             dig_progress: HashMap::new(),
@@ -83,7 +95,7 @@ impl GameState {
             rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
             next_player_id: 1,
             next_hive_id: 1,
-            next_npc_id: 3,
+            next_npc_id,
         }
     }
 
@@ -115,6 +127,10 @@ impl GameState {
             event_log: vec!["Server restored world snapshot".to_string()],
             config,
             simulation_paused: snapshot.simulation_paused,
+            found_food_count: 0,
+            delivered_food_count: 0,
+            egg_laid_count: 0,
+            egg_hatched_count: 0,
             npc_debug_enabled: false,
             npc_debug_events: Vec::new(),
             dig_progress: HashMap::new(),

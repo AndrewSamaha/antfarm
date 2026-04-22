@@ -1,23 +1,28 @@
 mod client_session;
 mod debug_npc;
+mod experiment;
 mod logging;
 mod persistence;
 mod runtime;
 mod server_state;
+mod startup_commands;
 mod sync;
 
 use anyhow::Result;
+use antfarm_core::set_config_path;
 use serde_json::json;
 use std::{
-    env,
     collections::HashMap,
+    env,
     path::PathBuf,
     sync::Arc,
 };
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{net::TcpListener, sync::{Mutex, Notify}};
 
 use crate::{
     client_session::{SNAPSHOT_DB_PATH, handle_client},
+    debug_npc::start_npc_debug_session_at_path,
+    experiment::{datetime_seed, debug_log_path, load_server_config, maybe_create_run_context, persist_run_manifest},
     logging::{emit_log, world_log_fields},
     persistence::{
         delete_all_named_gamestates, delete_named_gamestate, list_named_gamestates,
@@ -25,6 +30,7 @@ use crate::{
     },
     runtime::spawn_background_tasks,
     server_state::ServerState,
+    startup_commands::run_startup_sc_commands,
 };
 
 const SERVER_ADDR: &str = "127.0.0.1:7000";
@@ -39,6 +45,7 @@ Usage:
 
 Options:
       -h, --help                   Show this help text and exit
+      --server-config VALUE    Load server settings from a YAML file
       --reset-world            Clear live world snapshots and player profiles before startup
       --paused                 Start the simulation in the paused state
       --list-gamestates        List saved gamestate bookmarks and exit
@@ -61,11 +68,19 @@ async fn main() -> Result<()> {
     let start_paused = args.iter().any(|arg| arg == "--paused");
     let list_gamestates = args.iter().any(|arg| arg == "--list-gamestates");
     let delete_all_gamestates = args.iter().any(|arg| arg == "--delete-all-gamestates");
+    let mut server_config_path = None;
     let mut load_gamestate = None;
     let mut delete_gamestate = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
+            "--server-config" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--server-config requires a path"))?;
+                server_config_path = Some(path.clone());
+                index += 1;
+            }
             "--load-gamestate" => {
                 let selector = args
                     .get(index + 1)
@@ -84,18 +99,37 @@ async fn main() -> Result<()> {
         }
         index += 1;
     }
+    let loaded_server_config = load_server_config(server_config_path.as_deref())?;
+    let start_paused = start_paused || loaded_server_config.file.startup.paused;
+    let reset_world = reset_world || loaded_server_config.file.startup.reset_world;
+    let load_gamestate = load_gamestate.or(loaded_server_config.file.startup.load_gamestate.clone());
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
+    let mut experiment_context =
+        maybe_create_run_context(loaded_server_config.path.as_deref(), &loaded_server_config.file.experiment)?;
+    let mut startup_config_override = loaded_server_config.file.config.clone();
+    if loaded_server_config.file.experiment.randomize_seed_from_datetime {
+        let seed = datetime_seed()?;
+        set_config_path(&mut startup_config_override, "world.seed", json!(seed))
+            .map_err(anyhow::Error::msg)?;
+        if let Some(context) = experiment_context.as_mut() {
+            context.randomized_seed = Some(seed);
+            persist_run_manifest(context)?;
+        }
+    }
     emit_log(
         "starting_server",
         json!({
             "addr": SERVER_ADDR,
             "snapshot_db": snapshot_path.display().to_string(),
+            "server_config": loaded_server_config.path.as_ref().map(|path| path.display().to_string()),
             "reset_world": reset_world,
             "start_paused": start_paused,
             "list_gamestates": list_gamestates,
             "load_gamestate": load_gamestate,
             "delete_gamestate": delete_gamestate,
             "delete_all_gamestates": delete_all_gamestates,
+            "experiment_run_dir": experiment_context.as_ref().map(|ctx| ctx.run_dir.display().to_string()),
+            "randomized_seed": experiment_context.as_ref().and_then(|ctx| ctx.randomized_seed),
         }),
     );
     if list_gamestates {
@@ -130,7 +164,12 @@ async fn main() -> Result<()> {
     }
     let persistence_tx = spawn_persistence_worker(snapshot_path.clone())?;
     let (initial_game, restored) =
-        load_startup_game(&snapshot_path, start_paused, load_gamestate.as_deref())?;
+        load_startup_game(
+            &snapshot_path,
+            start_paused,
+            load_gamestate.as_deref(),
+            &startup_config_override,
+        )?;
 
     emit_log(
         "server_start",
@@ -140,30 +179,86 @@ async fn main() -> Result<()> {
             "restored_snapshot": restored,
             "simulation_paused": initial_game.simulation_paused,
             "load_gamestate": load_gamestate,
+            "server_config": loaded_server_config.path.as_ref().map(|path| path.display().to_string()),
+            "randomized_seed": experiment_context.as_ref().and_then(|ctx| ctx.randomized_seed),
             "world": world_log_fields(&initial_game),
         }),
     );
 
     let listener = TcpListener::bind(SERVER_ADDR).await?;
+    let tick_millis = experiment_context
+        .as_ref()
+        .map(|ctx| ctx.tick_millis)
+        .unwrap_or(antfarm_core::TICK_MILLIS);
     let state = ServerState {
         game: Arc::new(Mutex::new(initial_game)),
         clients: Arc::new(Mutex::new(HashMap::new())),
         session_tokens: Arc::new(Mutex::new(HashMap::new())),
         persistence_tx,
         npc_debug: Arc::new(Mutex::new(None)),
+        experiment: Arc::new(Mutex::new(experiment_context)),
+        shutdown_notify: Arc::new(Notify::new()),
+        tick_millis,
     };
+
+    let auto_debug_session = {
+        let experiment = state.experiment.lock().await;
+        if let Some(context) = experiment.as_ref() {
+            if context.debug_log {
+                Some(start_npc_debug_session_at_path(&debug_log_path(context))?)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(session) = auto_debug_session {
+        {
+            let mut game = state.game.lock().await;
+            game.set_npc_debug_enabled(true);
+            game.push_server_event(format!("NPC debug started: {}", session.path.display()));
+            let _ = game.take_patch();
+        }
+        *state.npc_debug.lock().await = Some(session);
+    }
+
+    let npc_debug_dir = state
+        .experiment
+        .lock()
+        .await
+        .as_ref()
+        .map(|ctx| ctx.run_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("data"));
+    run_startup_sc_commands(
+        &state,
+        &snapshot_path,
+        &npc_debug_dir,
+        &loaded_server_config.file.startup.sc_commands,
+    )
+    .await?;
 
     spawn_background_tasks(&state);
 
     emit_log("server_listening", json!({ "addr": SERVER_ADDR }));
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_client(stream, state).await {
-                emit_log("client_session_error", json!({ "error": error.to_string() }));
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (stream, _) = accept_result?;
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_client(stream, state).await {
+                        emit_log("client_session_error", json!({ "error": error.to_string() }));
+                    }
+                });
             }
-        });
+            _ = state.shutdown_notify.notified() => {
+                emit_log("server_shutdown_requested", json!({ "reason": "experiment_completed" }));
+                break;
+            }
+        }
     }
+
+    Ok(())
 }

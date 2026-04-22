@@ -30,7 +30,15 @@ pub(crate) fn start_npc_debug_session(dir: &Path) -> Result<NpcDebugSession> {
         .context("system clock before unix epoch")?
         .as_millis();
     let path = dir.join(format!("debug.npc.{ts_ms}.sqlite"));
+    start_npc_debug_session_at_path(&path)
+}
+
+pub(crate) fn start_npc_debug_session_at_path(path: &Path) -> Result<NpcDebugSession> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let (tx, rx) = mpsc::channel::<NpcDebugMessage>();
+    let path = path.to_path_buf();
     let thread_path = path.clone();
     thread::spawn(move || {
         if let Err(error) = npc_debug_worker_loop(thread_path, rx) {

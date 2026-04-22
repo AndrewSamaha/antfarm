@@ -1,0 +1,58 @@
+config:
+  soil:
+    settle_frequency: 0.00001
+  colony:
+    ambient_worker_count: 2
+    worker_lifespan_ticks: 600
+    queen_egg_food_cost: 2
+    egg_hatch_ticks: 36
+    queen_delivery_radius: 5
+    queen_no_fill_radius: 8
+    dirt_place_cooldown_ticks: 11
+    max_workers_per_hive: 0
+  world:
+    seed: 7
+    max_depth: -255
+    snapshot_interval: 5.0
+    gen_params:
+      chunk_width: 16
+      soil:
+        surface_variation: 4
+        dirt_depth: 150
+        dirt_variation: 3
+      ore:
+        attempts_per_chunk: 2
+        cluster_min: 6
+        cluster_max: 18
+        min_depth: 20
+        max_depth: 220
+      food:
+        attempts_per_chunk: 3
+        cluster_min: 6
+        cluster_max: 14
+        min_depth: 0
+        max_depth: 50
+      stone_pockets:
+        attempts_per_chunk: 60.0
+        cluster_min: 1
+        cluster_max: 60
+        min_depth: 0
+        max_depth: 235
+        depth_gain: 0.00002
+
+startup:
+  paused: false
+  reset_world: false
+  load_gamestate:
+  sc_commands: []
+
+experiment:
+  debug_log: false
+  terminate_server_on_completion: false
+  randomize_seed_from_datetime: false
+  tick_millis:
+  stop_conditions:
+    max_tick:
+    max_day:
+    all_workers_dead: false
+    no_eggs: false
