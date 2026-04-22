@@ -1,12 +1,10 @@
 use rand::Rng;
 use serde_json::{Value, json};
 
-const QUEEN_DELIVERY_RADIUS: i32 = 5;
 const RECENT_POSITION_MEMORY_SIZE: usize = 5;
-const QUEEN_NO_FILL_RADIUS: i32 = 8;
-const DIRT_PLACE_COOLDOWN_TICKS: u64 = 11;
 
 use crate::{
+    config::{config_i32, config_u16, config_u64},
     constants::{
         DEFAULT_SOIL_SETTLE_FREQUENCY, EGG_HATCH_TICKS, NPC_WORKER_LIFESPAN_TICKS,
         PHEROMONE_DECAY_AMOUNT,
@@ -67,7 +65,7 @@ impl GameState {
     fn tick_worker(&mut self, index: usize, events: &mut Vec<String>) {
         if self.npcs[index].hive_id.is_some() {
             self.npcs[index].age_ticks = self.npcs[index].age_ticks.saturating_add(1);
-            if self.npcs[index].age_ticks >= NPC_WORKER_LIFESPAN_TICKS {
+            if self.npcs[index].age_ticks >= self.worker_lifespan_ticks() {
                 let npc_id = self.npcs[index].id;
                 let npc_hive = self.npcs[index].hive_id;
                 let npc_pos = self.npcs[index].pos;
@@ -280,7 +278,7 @@ impl GameState {
                     self.set_world_tile(next, Tile::Empty);
                     self.npcs[index].pos = next;
                     let lifespan_bonus =
-                        worker_lifespan_bonus(self.npcs[index].age_ticks, NPC_WORKER_LIFESPAN_TICKS);
+                        worker_lifespan_bonus(self.npcs[index].age_ticks, self.worker_lifespan_ticks());
                     self.npcs[index].age_ticks =
                         self.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
                     self.npcs[index].carrying_food = true;
@@ -289,6 +287,7 @@ impl GameState {
                     self.npcs[index].home_trail_steps = None;
                     self.npcs[index].recent_home_memory_ticks = 0;
                     self.npcs[index].recent_positions.clear();
+                    self.found_food_count = self.found_food_count.saturating_add(1);
                     self.npcs_dirty = true;
                     events.push(format!("NPC ant {} found food", npc_id));
                     self.push_npc_debug_event(crate::NpcDebugEvent {
@@ -375,8 +374,23 @@ impl GameState {
             );
         }
         self.npcs[index].food = self.npcs[index].food.min(NpcKind::Queen.max_food());
-        if self.npcs[index].food < QUEEN_EGG_FOOD_COST {
+        let egg_food_cost = self.queen_egg_food_cost();
+        if self.npcs[index].food < egg_food_cost {
             return;
+        }
+        let max_workers_per_hive = self.max_workers_per_hive();
+        if let (Some(limit), Some(hive_id)) = (max_workers_per_hive, queen_hive_id) {
+            let hive_workers = self
+                .npcs
+                .iter()
+                .filter(|npc| {
+                    npc.hive_id == Some(hive_id)
+                        && matches!(npc.kind, NpcKind::Worker | NpcKind::Egg)
+                })
+                .count();
+            if hive_workers >= limit {
+                return;
+            }
         }
         let occupied: Vec<_> = self
             .players
@@ -388,7 +402,8 @@ impl GameState {
             return;
         };
 
-        self.npcs[index].food = self.npcs[index].food.saturating_sub(QUEEN_EGG_FOOD_COST);
+        self.npcs[index].food = self.npcs[index].food.saturating_sub(egg_food_cost);
+        self.egg_laid_count = self.egg_laid_count.saturating_add(1);
         spawned_npcs.push(NpcAnt {
             id: self.next_npc_id,
             pos: egg_pos,
@@ -428,9 +443,10 @@ impl GameState {
     }
 
     fn tick_egg(&mut self, index: usize, events: &mut Vec<String>) {
+        let egg_hatch_ticks = self.egg_hatch_ticks();
         let egg = &mut self.npcs[index];
         egg.age_ticks = egg.age_ticks.saturating_add(1);
-        if egg.age_ticks < EGG_HATCH_TICKS {
+        if egg.age_ticks < egg_hatch_ticks {
             return;
         }
 
@@ -447,6 +463,7 @@ impl GameState {
         egg.recent_home_memory_ticks = 0;
         egg.recent_food_memory_ticks = 0;
         egg.recent_positions.clear();
+        self.egg_hatched_count = self.egg_hatched_count.saturating_add(1);
         let hatched_id = egg.id;
         let hatched_hive_id = egg.hive_id;
         let hatched_pos = egg.pos;
@@ -482,7 +499,7 @@ impl GameState {
             return false;
         }
         if let Some(last_tick) = self.npcs[index].last_dirt_place_tick
-            && self.tick.saturating_sub(last_tick) < DIRT_PLACE_COOLDOWN_TICKS
+            && self.tick.saturating_sub(last_tick) < self.dirt_place_cooldown_ticks()
         {
             return false;
         }
@@ -495,7 +512,7 @@ impl GameState {
         };
         let npc_pos = self.npcs[index].pos;
         let queen_distance = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
-        if queen_distance <= QUEEN_NO_FILL_RADIUS {
+        if queen_distance <= self.queen_no_fill_radius() {
             return false;
         }
 
@@ -635,7 +652,7 @@ impl GameState {
             npc.kind == NpcKind::Queen
                 && npc.hive_id == Some(hive_id)
                 && (npc.pos.x - worker_pos.x).abs() + (npc.pos.y - worker_pos.y).abs()
-                    <= QUEEN_DELIVERY_RADIUS
+                    <= self.queen_delivery_radius()
         });
         let Some(queen_index) = queen_index else {
             return false;
@@ -652,6 +669,7 @@ impl GameState {
         self.npcs[worker_index].home_trail_steps = Some(0);
         self.npcs[worker_index].recent_food_memory_ticks = 0;
         self.npcs[worker_index].recent_positions.clear();
+        self.delivered_food_count = self.delivered_food_count.saturating_add(1);
         self.push_npc_debug_event(crate::NpcDebugEvent {
             tick: self.tick,
             npc_id: self.npcs[worker_index].id,
@@ -858,6 +876,47 @@ impl GameState {
                 self.set_world_tile(pos, Tile::Empty);
                 self.set_world_tile(target, Tile::Dirt);
             }
+        }
+    }
+}
+
+impl GameState {
+    fn worker_lifespan_ticks(&self) -> u16 {
+        config_u16(
+            &self.config,
+            "colony.worker_lifespan_ticks",
+            NPC_WORKER_LIFESPAN_TICKS,
+        )
+    }
+
+    fn queen_egg_food_cost(&self) -> u16 {
+        config_u16(
+            &self.config,
+            "colony.queen_egg_food_cost",
+            QUEEN_EGG_FOOD_COST,
+        )
+    }
+
+    fn egg_hatch_ticks(&self) -> u16 {
+        config_u16(&self.config, "colony.egg_hatch_ticks", EGG_HATCH_TICKS)
+    }
+
+    fn queen_delivery_radius(&self) -> i32 {
+        config_i32(&self.config, "colony.queen_delivery_radius", 5).max(1)
+    }
+
+    fn queen_no_fill_radius(&self) -> i32 {
+        config_i32(&self.config, "colony.queen_no_fill_radius", 8).max(0)
+    }
+
+    fn dirt_place_cooldown_ticks(&self) -> u64 {
+        config_u64(&self.config, "colony.dirt_place_cooldown_ticks", 11)
+    }
+
+    fn max_workers_per_hive(&self) -> Option<usize> {
+        match config_u64(&self.config, "colony.max_workers_per_hive", 0) {
+            0 => None,
+            value => usize::try_from(value).ok(),
         }
     }
 }

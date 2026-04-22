@@ -43,6 +43,12 @@ pub enum ClientMessage {
         resource: String,
         amount: u16,
     },
+    FeedQueens {
+        amount: u16,
+    },
+    Kill {
+        selector: String,
+    },
     DigArea {
         width: u16,
         height: u16,

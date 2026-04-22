@@ -13,8 +13,8 @@ mod world;
 
 pub use art::{AsciiArtAsset, find_ascii_art_asset};
 pub use config::{
-    config_f64, config_i32, config_u64, default_server_config, merge_with_default_config,
-    set_config_path,
+    config_f64, config_i32, config_u16, config_u64, default_server_config, merge_config,
+    merge_with_default_config, set_config_path,
 };
 pub use constants::{
     DAY_TICKS, DEFAULT_SOIL_SETTLE_FREQUENCY, DEFAULT_WORLD_MAX_DEPTH,

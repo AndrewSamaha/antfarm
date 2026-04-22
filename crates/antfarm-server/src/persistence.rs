@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use antfarm_core::{GameState, Player, Snapshot, default_server_config};
+use antfarm_core::{GameState, Player, Snapshot, default_server_config, merge_config};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
@@ -28,10 +28,12 @@ pub(crate) fn load_startup_game(
     path: &Path,
     start_paused: bool,
     load_gamestate: Option<&str>,
+    config_override: &Value,
 ) -> Result<(GameState, bool)> {
     if let Some(selector) = load_gamestate {
-        let snapshot = load_named_gamestate(path, selector)?
+        let mut snapshot = load_named_gamestate(path, selector)?
             .ok_or_else(|| anyhow!("named gamestate not found: {selector}"))?;
+        snapshot.config = merge_config(snapshot.config, config_override.clone());
         let mut game = GameState::from_snapshot(snapshot);
         if start_paused {
             game.set_simulation_paused(true);
@@ -47,13 +49,15 @@ pub(crate) fn load_startup_game(
     }
 
     if let Some(snapshot) = load_latest_snapshot(path)? {
+        let mut snapshot = snapshot;
+        snapshot.config = merge_config(snapshot.config, config_override.clone());
         let mut game = GameState::from_snapshot(snapshot);
         if start_paused {
             game.set_simulation_paused(true);
         }
         Ok((game, true))
     } else {
-        let config = default_server_config();
+        let config = merge_config(default_server_config(), config_override.clone());
         emit_log(
             "generating_world",
             json!({

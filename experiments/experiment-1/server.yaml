@@ -1,0 +1,27 @@
+config:
+  colony:
+    ambient_worker_count: 0
+    worker_lifespan_ticks: 600
+    queen_egg_food_cost: 2
+    max_workers_per_hive: 1
+
+startup:
+  paused: true
+  reset_world: false
+  load_gamestate: "experiment 1"
+  sc_commands:
+    - /sc feed_queen 10
+    - /sc kill @e[type=worker,hive=none]
+    - /sc game unpause
+
+experiment:
+  debug_log: true
+  terminate_server_on_completion: true
+  randomize_seed_from_datetime: true
+  tick_millis: 1
+  stop_conditions:
+    or:
+      - max_day: 60
+      - and:
+        - all_workers_dead: true
+        - no_eggs: true
