@@ -33,13 +33,45 @@ Cross-platform terminal ant colony game prototype in Rust.
 In one terminal:
 
 ```bash
-cargo run -p antfarm-server
+./antfarm server
 ```
 
 In one or more additional terminals:
 
 ```bash
-cargo run -p antfarm-tui -- scout
+./antfarm client scout
+```
+
+If you omit the name, the client defaults to `worker-ant`:
+
+```bash
+./antfarm client
+```
+
+To run a single experiment-configured server:
+
+```bash
+cd ./experiments/experiment-1
+../../antfarm server
+```
+
+This defaults to `./server.yaml` in your current directory. You can still point at a file or directory explicitly:
+
+```bash
+./antfarm server --server-config ./experiments/experiment-1/server.yaml
+./antfarm server --server-config ./experiments/experiment-1
+```
+
+If that experiment config defines named conditions, select one explicitly:
+
+```bash
+./antfarm server --server-config ./experiments/experiment-1/server.yaml --condition baseline
+```
+
+To run the same experiment config multiple times:
+
+```bash
+./antfarm experiment --server-config ./experiments/experiment-1/server.yaml --num-runs 10
 ```
 
 Use `h j k l` to move; filled tiles auto-dig. Use `Space d h/j/k/l` to place dirt and `Space s h/j/k/l` to place stone. Press `/` to enter a slash command like `/sc set soil.settle_frequency 0.01`, `/sc set world.max_depth -255`, `/sc show_params`, or `/sc world_reset`, `?` to toggle the help modal, and `q` to quit.

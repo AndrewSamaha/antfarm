@@ -46,6 +46,9 @@ pub enum ClientMessage {
     FeedQueens {
         amount: u16,
     },
+    SetQueenEggs {
+        eggs: u16,
+    },
     Kill {
         selector: String,
     },

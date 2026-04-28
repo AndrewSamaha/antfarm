@@ -22,7 +22,10 @@ use tokio::{net::TcpListener, sync::{Mutex, Notify}};
 use crate::{
     client_session::{SNAPSHOT_DB_PATH, handle_client},
     debug_npc::start_npc_debug_session_at_path,
-    experiment::{datetime_seed, debug_log_path, load_server_config, maybe_create_run_context, persist_run_manifest},
+    experiment::{
+        condition_plan, datetime_seed, debug_log_path, load_server_config, maybe_create_run_context,
+        persist_run_manifest, resolve_server_config,
+    },
     logging::{emit_log, world_log_fields},
     persistence::{
         delete_all_named_gamestates, delete_named_gamestate, list_named_gamestates,
@@ -46,6 +49,9 @@ Usage:
 Options:
       -h, --help                   Show this help text and exit
       --server-config VALUE    Load server settings from a YAML file
+      --condition VALUE        Select one named experiment condition from server.yaml
+      --list-condition-plan    Print condition names and configured run counts, then exit
+      --print-visualizations-json  Print experiment visualization specs as JSON and exit
       --reset-world            Clear live world snapshots and player profiles before startup
       --paused                 Start the simulation in the paused state
       --list-gamestates        List saved gamestate bookmarks and exit
@@ -67,8 +73,12 @@ async fn main() -> Result<()> {
     let reset_world = args.iter().any(|arg| arg == "--reset-world");
     let start_paused = args.iter().any(|arg| arg == "--paused");
     let list_gamestates = args.iter().any(|arg| arg == "--list-gamestates");
+    let list_condition_plan = args.iter().any(|arg| arg == "--list-condition-plan");
+    let print_visualizations_json =
+        args.iter().any(|arg| arg == "--print-visualizations-json");
     let delete_all_gamestates = args.iter().any(|arg| arg == "--delete-all-gamestates");
     let mut server_config_path = None;
+    let mut condition = None;
     let mut load_gamestate = None;
     let mut delete_gamestate = None;
     let mut index = 0;
@@ -79,6 +89,13 @@ async fn main() -> Result<()> {
                     .get(index + 1)
                     .ok_or_else(|| anyhow::anyhow!("--server-config requires a path"))?;
                 server_config_path = Some(path.clone());
+                index += 1;
+            }
+            "--condition" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--condition requires a name"))?;
+                condition = Some(value.clone());
                 index += 1;
             }
             "--load-gamestate" => {
@@ -100,14 +117,36 @@ async fn main() -> Result<()> {
         index += 1;
     }
     let loaded_server_config = load_server_config(server_config_path.as_deref())?;
-    let start_paused = start_paused || loaded_server_config.file.startup.paused;
-    let reset_world = reset_world || loaded_server_config.file.startup.reset_world;
-    let load_gamestate = load_gamestate.or(loaded_server_config.file.startup.load_gamestate.clone());
+    if list_condition_plan {
+        for entry in condition_plan(&loaded_server_config.file)? {
+            println!(
+                "{}\t{}",
+                entry.name.as_deref().unwrap_or("-"),
+                entry.runs
+            );
+        }
+        return Ok(());
+    }
+    if print_visualizations_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&loaded_server_config.file.experiment.visualizations)?
+        );
+        return Ok(());
+    }
+    let resolved_server_config = resolve_server_config(&loaded_server_config.file, condition.as_deref())?;
+    let start_paused = start_paused || resolved_server_config.startup.paused;
+    let reset_world = reset_world || resolved_server_config.startup.reset_world;
+    let load_gamestate = load_gamestate.or(resolved_server_config.startup.load_gamestate.clone());
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
     let mut experiment_context =
-        maybe_create_run_context(loaded_server_config.path.as_deref(), &loaded_server_config.file.experiment)?;
-    let mut startup_config_override = loaded_server_config.file.config.clone();
-    if loaded_server_config.file.experiment.randomize_seed_from_datetime {
+        maybe_create_run_context(
+            loaded_server_config.path.as_deref(),
+            &resolved_server_config.experiment,
+            resolved_server_config.condition_name.as_deref(),
+        )?;
+    let mut startup_config_override = resolved_server_config.config.clone();
+    if resolved_server_config.experiment.randomize_seed_from_datetime {
         let seed = datetime_seed()?;
         set_config_path(&mut startup_config_override, "world.seed", json!(seed))
             .map_err(anyhow::Error::msg)?;
@@ -122,9 +161,11 @@ async fn main() -> Result<()> {
             "addr": SERVER_ADDR,
             "snapshot_db": snapshot_path.display().to_string(),
             "server_config": loaded_server_config.path.as_ref().map(|path| path.display().to_string()),
+            "condition": resolved_server_config.condition_name,
             "reset_world": reset_world,
             "start_paused": start_paused,
             "list_gamestates": list_gamestates,
+            "list_condition_plan": list_condition_plan,
             "load_gamestate": load_gamestate,
             "delete_gamestate": delete_gamestate,
             "delete_all_gamestates": delete_all_gamestates,
@@ -170,6 +211,10 @@ async fn main() -> Result<()> {
             load_gamestate.as_deref(),
             &startup_config_override,
         )?;
+    if let Some(context) = experiment_context.as_mut() {
+        context.start_tick = initial_game.tick;
+        persist_run_manifest(context)?;
+    }
 
     emit_log(
         "server_start",
@@ -178,8 +223,10 @@ async fn main() -> Result<()> {
             "snapshot_db": snapshot_path.display().to_string(),
             "restored_snapshot": restored,
             "simulation_paused": initial_game.simulation_paused,
+            "start_tick": initial_game.tick,
             "load_gamestate": load_gamestate,
             "server_config": loaded_server_config.path.as_ref().map(|path| path.display().to_string()),
+            "condition": resolved_server_config.condition_name,
             "randomized_seed": experiment_context.as_ref().and_then(|ctx| ctx.randomized_seed),
             "world": world_log_fields(&initial_game),
         }),
@@ -234,7 +281,7 @@ async fn main() -> Result<()> {
         &state,
         &snapshot_path,
         &npc_debug_dir,
-        &loaded_server_config.file.startup.sc_commands,
+        &resolved_server_config.startup.sc_commands,
     )
     .await?;
 

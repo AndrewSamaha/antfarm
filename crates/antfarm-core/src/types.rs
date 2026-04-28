@@ -112,7 +112,17 @@ pub struct NpcAnt {
     #[serde(default)]
     pub recent_positions: Vec<Position>,
     #[serde(default)]
+    pub search_destination: Option<Position>,
+    #[serde(default)]
+    pub search_destination_stuck_ticks: u8,
+    #[serde(default)]
+    pub has_delivered_food: bool,
+    #[serde(default)]
     pub last_dirt_place_tick: Option<u64>,
+    #[serde(default)]
+    pub last_egg_laid_tick: Option<u64>,
+    #[serde(default)]
+    pub last_egg_hatched_tick: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

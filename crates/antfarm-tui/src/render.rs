@@ -325,7 +325,12 @@ fn render_placed_art_cell(app: &App, pos: Position) -> Option<Span<'static>> {
         };
         let local_x = pos.x - placed.pos.x;
         let local_y = pos.y - placed.pos.y;
-        let Some((left, right)) = asset.glyph_pair_at_world(local_x, local_y) else {
+        let rows = if asset.id == "queen_ant" {
+            app.queen_rows_for_asset(asset, placed.pos)
+        } else {
+            asset.rows
+        };
+        let Some((left, right)) = asset.glyph_pair_at_world_in_rows(rows, local_x, local_y) else {
             continue;
         };
         return Some(Span::styled(

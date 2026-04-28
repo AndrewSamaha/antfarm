@@ -204,6 +204,28 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     broadcast_patch(&state, &patch, None).await?;
                 }
             }
+            ClientMessage::SetQueenEggs { eggs } => {
+                let Some(_id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before setting queen eggs".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let (maybe_patch, snapshot) = {
+                    let mut game = state.game.lock().await;
+                    game.set_queen_eggs(eggs).map_err(anyhow::Error::msg)?;
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot)
+                };
+
+                emit_log("sc_set_queen_eggs", json!({ "eggs": eggs }));
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
             ClientMessage::Kill { selector } => {
                 let Some(_id) = player_id else {
                     tx.send(ServerMessage::Error {

@@ -2,6 +2,8 @@ use antfarm_core::GameState;
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MSG_SOURCE: &str = "antfarm-server";
+
 pub(crate) fn emit_log(event: &str, fields: Value) {
     let ts_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -10,6 +12,7 @@ pub(crate) fn emit_log(event: &str, fields: Value) {
     let mut object = serde_json::Map::new();
     object.insert("ts_ms".to_string(), Value::from(ts_ms));
     object.insert("event".to_string(), Value::from(event));
+    object.insert("msg_source".to_string(), Value::from(MSG_SOURCE));
     if let Value::Object(extra) = fields {
         for (key, value) in extra {
             object.insert(key, value);

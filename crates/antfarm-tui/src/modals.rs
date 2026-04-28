@@ -50,6 +50,7 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("/sc give @a q 1"),
         Line::from("/sc give @e dirt 10"),
         Line::from("/sc feed_queen 50"),
+        Line::from("/sc set queen.eggs 1"),
         Line::from("/sc kill @e[type=worker,hive=none]"),
         Line::from("/sc dig 20 12"),
         Line::from("/sc put food 5 5"),

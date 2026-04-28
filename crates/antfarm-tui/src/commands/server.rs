@@ -155,6 +155,16 @@ pub(super) async fn submit_server_command(
         return Ok(());
     }
 
+    if head == "/sc" && verb == "set" && path == "queen.eggs" {
+        let eggs_raw = raw_value;
+        let eggs = eggs_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("queen.eggs must be an unsigned integer"))?;
+        send_message(writer, ClientMessage::SetQueenEggs { eggs }).await?;
+        app.clear_status();
+        return Ok(());
+    }
+
     if head == "/sc" && verb == "kill" {
         let selector = trimmed
             .strip_prefix("/sc kill ")
@@ -251,7 +261,7 @@ pub(super) async fn submit_server_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc feed_queen <amount>, /sc kill <selector>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc feed_queen <amount>, /sc set queen.eggs <n>, /sc kill <selector>, /sc dig <width> <height>, /sc put <resource> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
         return Ok(());
     }
 
