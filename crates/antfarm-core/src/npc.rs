@@ -39,7 +39,12 @@ pub(crate) fn default_npcs_with_count(world: &World, count: u16) -> Vec<NpcAnt> 
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            has_delivered_food: false,
             last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
         });
     }
     npcs

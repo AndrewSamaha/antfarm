@@ -1,0 +1,35 @@
+{
+  "experiment_dir": "/Users/andrew/Development/antfarm/experiments/experiment-1",
+  "metrics": {
+    "delivered_food": 9.0,
+    "delivered_food_per_day": 0.2903225806451613,
+    "final_day": 31.0,
+    "final_tick": 3087.0,
+    "found_food": 9.0,
+    "selected_move_count": 1331.0,
+    "simulation_length": 1403.0,
+    "steps_to_nth_food": {
+      "1": 200.0,
+      "2": 15.0,
+      "3": 20.0,
+      "4": 28.0,
+      "5": 13.0,
+      "6": 100.0,
+      "7": 42.0,
+      "8": 115.0,
+      "9": 101.0
+    },
+    "steps_to_nth_queen": {
+      "1": 10.0,
+      "2": 10.0,
+      "3": 9.0,
+      "4": 10.0,
+      "5": 11.0,
+      "6": 19.0,
+      "7": 23.0,
+      "8": 20.0,
+      "9": 14.0
+    }
+  },
+  "run_dir": "/Users/andrew/Development/antfarm/experiments/experiment-1/baseline/runs/run-1776979501474"
+}

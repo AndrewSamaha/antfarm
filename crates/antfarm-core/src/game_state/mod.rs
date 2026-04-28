@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use crate::{
     art::find_ascii_art_asset,
     config::{
-        config_f64, config_u16, config_u64, default_server_config, merge_with_default_config,
+        config_f64, config_u16, config_u64, default_server_config, merge_config,
+        merge_with_default_config,
         set_config_path,
     },
     constants::{
@@ -177,6 +178,13 @@ impl GameState {
         self.config_dirty = true;
         self.push_event(format!("Config updated: {path}"));
         Ok(())
+    }
+
+    pub fn apply_config_override(&mut self, override_config: Value) {
+        self.config = merge_with_default_config(merge_config(self.config.clone(), override_config));
+        let seed = config_u64(&self.config, "world.seed", DEFAULT_WORLD_SEED);
+        self.rng = StdRng::seed_from_u64(seed ^ 0xAB_CD_EF);
+        self.config_dirty = true;
     }
 
     pub fn world_reset(&mut self, seed: Option<u64>) {

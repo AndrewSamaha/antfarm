@@ -1,4 +1,17 @@
 #[derive(Debug)]
+pub struct AsciiArtIdleAnimationFrame {
+    pub duration_ms: u64,
+    pub rows: &'static [&'static str],
+}
+
+#[derive(Debug)]
+pub struct AsciiArtIdleAnimation {
+    pub name: &'static str,
+    pub average_interval_ms: u64,
+    pub frames: &'static [AsciiArtIdleAnimationFrame],
+}
+
+#[derive(Debug)]
 pub struct AsciiArtAsset {
     pub id: &'static str,
     pub kind: &'static str,
@@ -9,6 +22,7 @@ pub struct AsciiArtAsset {
     pub width: usize,
     pub height: usize,
     pub rows: &'static [&'static str],
+    pub idle_animations: &'static [AsciiArtIdleAnimation],
 }
 
 include!(concat!(env!("OUT_DIR"), "/art_assets.rs"));
@@ -27,11 +41,20 @@ impl AsciiArtAsset {
     }
 
     pub fn glyph_pair_at_world(&self, local_x: i32, local_y: i32) -> Option<(char, char)> {
+        self.glyph_pair_at_world_in_rows(self.rows, local_x, local_y)
+    }
+
+    pub fn glyph_pair_at_world_in_rows(
+        &self,
+        rows: &'static [&'static str],
+        local_x: i32,
+        local_y: i32,
+    ) -> Option<(char, char)> {
         if local_x < 0 || local_y < 0 {
             return None;
         }
 
-        let row = self.rows.get(local_y as usize)?;
+        let row = rows.get(local_y as usize)?;
         let chars: Vec<char> = row.chars().collect();
         let start = local_x as usize * 2;
         if start >= chars.len() {

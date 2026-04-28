@@ -31,10 +31,10 @@ pub(crate) fn load_startup_game(
     config_override: &Value,
 ) -> Result<(GameState, bool)> {
     if let Some(selector) = load_gamestate {
-        let mut snapshot = load_named_gamestate(path, selector)?
+        let snapshot = load_named_gamestate(path, selector)?
             .ok_or_else(|| anyhow!("named gamestate not found: {selector}"))?;
-        snapshot.config = merge_config(snapshot.config, config_override.clone());
         let mut game = GameState::from_snapshot(snapshot);
+        game.apply_config_override(config_override.clone());
         if start_paused {
             game.set_simulation_paused(true);
         }
@@ -49,9 +49,8 @@ pub(crate) fn load_startup_game(
     }
 
     if let Some(snapshot) = load_latest_snapshot(path)? {
-        let mut snapshot = snapshot;
-        snapshot.config = merge_config(snapshot.config, config_override.clone());
         let mut game = GameState::from_snapshot(snapshot);
+        game.apply_config_override(config_override.clone());
         if start_paused {
             game.set_simulation_paused(true);
         }

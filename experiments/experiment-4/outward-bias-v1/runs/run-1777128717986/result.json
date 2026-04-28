@@ -1,0 +1,26 @@
+{
+  "day": 45,
+  "delivered_food": 103,
+  "egg_hatched": 55,
+  "egg_laid": 55,
+  "eggs": 0,
+  "found_food": 105,
+  "players": 0,
+  "queens": 1,
+  "randomized_seed": 1777128717987,
+  "simulation_length": 2792,
+  "simulation_paused": true,
+  "start_tick": 1684,
+  "stop_reason": {
+    "And": [
+      "AllWorkersDead",
+      "NoEggs"
+    ]
+  },
+  "tick": 4476,
+  "workers": 0,
+  "world": {
+    "height": 274,
+    "width": 160
+  }
+}

@@ -1,8 +1,13 @@
 use antfarm_core::{
-    FullSyncChunk, FullSyncComplete, FullSyncStart, MoveDir, PatchFrame, PheromoneChannel,
-    PheromoneMap, PlaceMaterial, Player, ServerMessage, Snapshot, World, default_server_config,
+    AsciiArtAsset, FullSyncChunk, FullSyncComplete, FullSyncStart, MoveDir, PatchFrame,
+    PheromoneChannel, PheromoneMap, PlaceMaterial, Player, Position, ServerMessage, Snapshot,
+    World, find_ascii_art_asset,
+    default_server_config,
 };
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug)]
 pub(crate) struct App {
@@ -25,6 +30,7 @@ pub(crate) struct App {
     pub(crate) last_info: Option<String>,
     pub(crate) max_history: usize,
     pub(crate) action_animation: Option<ActionAnimation>,
+    pub(crate) queen_idle_states: HashMap<Position, QueenIdleState>,
     pub(crate) sync_state: SyncState,
 }
 
@@ -47,6 +53,14 @@ pub(crate) enum PendingCommand {
 pub(crate) struct ActionAnimation {
     pub(crate) dir: MoveDir,
     pub(crate) until: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueenIdleState {
+    pub(crate) active_animation: Option<usize>,
+    pub(crate) frame_index: usize,
+    pub(crate) frame_until: Option<Instant>,
+    pub(crate) next_trigger_at: Instant,
 }
 
 impl App {
@@ -77,6 +91,7 @@ impl App {
             last_info: None,
             max_history,
             action_animation: None,
+            queen_idle_states: HashMap::new(),
             sync_state: SyncState::Connecting,
         }
     }
@@ -89,12 +104,11 @@ impl App {
     }
 
     pub(crate) fn tick_animation(&mut self) {
-        if self
-            .action_animation
-            .is_some_and(|animation| Instant::now() >= animation.until)
-        {
+        let now = Instant::now();
+        if self.action_animation.is_some_and(|animation| now >= animation.until) {
             self.action_animation = None;
         }
+        self.tick_queen_idle_animation(now);
     }
 
     pub(crate) fn enter_reconnecting(&mut self, message: String) {
@@ -106,6 +120,7 @@ impl App {
         self.show_params = false;
         self.params_scroll = 0;
         self.action_animation = None;
+        self.queen_idle_states.clear();
         self.pheromone_map = None;
         self.set_error(message);
     }
@@ -128,6 +143,7 @@ impl App {
         self.snapshot.event_log.clear();
         self.snapshot.config = default_server_config();
         self.snapshot.simulation_paused = false;
+        self.queen_idle_states.clear();
         self.pheromone_map = None;
         self.sync_state = SyncState::Syncing {
             received_rows: 0,
@@ -157,6 +173,7 @@ impl App {
         self.snapshot.event_log = complete.event_log;
         self.snapshot.config = complete.config;
         self.snapshot.simulation_paused = complete.simulation_paused;
+        self.sync_queen_idle_states();
         self.sync_state = SyncState::Ready;
         self.clear_status();
         self.sync_status_from_latest_event();
@@ -210,6 +227,115 @@ impl App {
             self.set_info(latest_event);
         }
     }
+
+    pub(crate) fn queen_rows_for_asset(
+        &self,
+        asset: &'static AsciiArtAsset,
+        origin: Position,
+    ) -> &'static [&'static str] {
+        let Some(state) = self.queen_idle_states.get(&origin) else {
+            return asset.rows;
+        };
+        let Some(animation_index) = state.active_animation else {
+            return asset.rows;
+        };
+        let Some(animation) = asset.idle_animations.get(animation_index) else {
+            return asset.rows;
+        };
+        animation
+            .frames
+            .get(state.frame_index)
+            .map(|frame| frame.rows)
+            .unwrap_or(asset.rows)
+    }
+
+    fn sync_queen_idle_states(&mut self) {
+        let now = Instant::now();
+        let mut next_states = HashMap::new();
+        for placed in &self.snapshot.placed_art {
+            let Some(asset) = find_ascii_art_asset(&placed.asset_id) else {
+                continue;
+            };
+            if asset.id != "queen_ant" || asset.idle_animations.is_empty() {
+                continue;
+            }
+            let state = self
+                .queen_idle_states
+                .get(&placed.pos)
+                .copied()
+                .unwrap_or_else(|| QueenIdleState {
+                    active_animation: None,
+                    frame_index: 0,
+                    frame_until: None,
+                    next_trigger_at: now
+                        + Duration::from_millis(schedule_idle_interval_ms(
+                            asset.idle_animations[0].average_interval_ms,
+                            placed.pos,
+                        )),
+                });
+            next_states.insert(placed.pos, state);
+        }
+        self.queen_idle_states = next_states;
+    }
+
+    fn tick_queen_idle_animation(&mut self, now: Instant) {
+        self.sync_queen_idle_states();
+        for placed in &self.snapshot.placed_art {
+            let Some(asset) = find_ascii_art_asset(&placed.asset_id) else {
+                continue;
+            };
+            if asset.id != "queen_ant" || asset.idle_animations.is_empty() {
+                continue;
+            }
+            let Some(state) = self.queen_idle_states.get_mut(&placed.pos) else {
+                continue;
+            };
+            match state.active_animation {
+                Some(animation_index) => {
+                    let Some(frame_until) = state.frame_until else {
+                        state.active_animation = None;
+                        state.frame_index = 0;
+                        state.next_trigger_at = now
+                            + Duration::from_millis(schedule_idle_interval_ms(
+                                asset.idle_animations[animation_index].average_interval_ms,
+                                placed.pos,
+                            ));
+                        continue;
+                    };
+                    if now < frame_until {
+                        continue;
+                    }
+                    let animation = &asset.idle_animations[animation_index];
+                    if state.frame_index + 1 < animation.frames.len() {
+                        state.frame_index += 1;
+                        state.frame_until = Some(
+                            now + Duration::from_millis(animation.frames[state.frame_index].duration_ms),
+                        );
+                    } else {
+                        state.active_animation = None;
+                        state.frame_index = 0;
+                        state.frame_until = None;
+                        state.next_trigger_at = now
+                            + Duration::from_millis(schedule_idle_interval_ms(
+                                animation.average_interval_ms,
+                                placed.pos,
+                            ));
+                    }
+                }
+                None => {
+                    if now < state.next_trigger_at {
+                        continue;
+                    }
+                    let animation_index = choose_idle_animation(asset, placed.pos);
+                    let animation = &asset.idle_animations[animation_index];
+                    state.active_animation = Some(animation_index);
+                    state.frame_index = 0;
+                    state.frame_until =
+                        Some(now + Duration::from_millis(animation.frames[0].duration_ms));
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn handle_server_message(app: &mut App, message: ServerMessage) {
@@ -249,4 +375,26 @@ fn apply_patch_frame(app: &mut App, patch: PatchFrame) {
     if let Some(simulation_paused) = patch.simulation_paused {
         app.snapshot.simulation_paused = simulation_paused;
     }
+    app.sync_queen_idle_states();
+}
+
+fn choose_idle_animation(asset: &'static AsciiArtAsset, pos: Position) -> usize {
+    if asset.idle_animations.len() <= 1 {
+        return 0;
+    }
+    (random_u64(pos) as usize) % asset.idle_animations.len()
+}
+
+fn schedule_idle_interval_ms(average_interval_ms: u64, pos: Position) -> u64 {
+    let half = average_interval_ms / 2;
+    let spread = average_interval_ms.max(1);
+    half + (random_u64(pos) % (spread + 1))
+}
+
+fn random_u64(pos: Position) -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ ((pos.x as u64) << 32) ^ (pos.y as u64).wrapping_mul(0x9E37_79B9)
 }

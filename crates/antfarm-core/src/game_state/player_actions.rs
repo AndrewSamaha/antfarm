@@ -1,8 +1,9 @@
 use crate::{
     art::find_ascii_art_asset,
+    config::config_u16,
     pheromones::AntBehaviorState,
     constants::SURFACE_Y,
-    constants::{MAX_PLAYERS, STONE_DIG_STEPS},
+    constants::{MAX_PLAYERS, QUEEN_EGG_FOOD_COST, STONE_DIG_STEPS},
     inventory::{add_inventory, default_inventory, default_npc_inventory, inventory_count, remove_inventory},
     protocol::{Action, DigProgress, PlaceMaterial, PlacedArt, Snapshot},
     types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, Tile},
@@ -207,6 +208,35 @@ impl GameState {
 
         self.npcs_dirty = true;
         self.push_event(format!("Fed {fed} queen(s) with {amount} food"));
+        Ok(())
+    }
+
+    pub fn set_queen_eggs(&mut self, eggs: u16) -> Result<(), String> {
+        let egg_food_cost = config_u16(
+            &self.config,
+            "colony.queen_egg_food_cost",
+            QUEEN_EGG_FOOD_COST,
+        );
+
+        let target_food = egg_food_cost.saturating_mul(eggs).min(NpcKind::Queen.max_food());
+
+        let mut updated = 0usize;
+        for npc in &mut self.npcs {
+            if npc.kind != NpcKind::Queen {
+                continue;
+            }
+            npc.food = target_food;
+            updated += 1;
+        }
+
+        if updated == 0 {
+            return Err("no queens available to set eggs".to_string());
+        }
+
+        self.npcs_dirty = true;
+        self.push_event(format!(
+            "Set {updated} queen(s) to {eggs} egg(s) worth of food"
+        ));
         Ok(())
     }
 
@@ -524,7 +554,12 @@ impl GameState {
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            has_delivered_food: false,
             last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;

@@ -91,26 +91,6 @@ async fn run_startup_sc_command(
         return Ok(());
     }
 
-    if let Some(raw) = trimmed.strip_prefix("/sc set ") {
-        let mut parts = raw.splitn(2, ' ');
-        let path = parts.next().unwrap_or_default().trim();
-        let raw_value = parts.next().unwrap_or_default().trim();
-        if path.is_empty() || raw_value.is_empty() {
-            return Err(anyhow!("expected: /sc set <path> <value>"));
-        }
-        let value = parse_config_value(raw_value)?;
-        let snapshot = {
-            let mut game = state.game.lock().await;
-            game.set_config_value(path, value.clone()).map_err(anyhow::Error::msg)?;
-            let snapshot = game.snapshot();
-            let _ = game.take_patch();
-            snapshot
-        };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
-        emit_log("startup_sc_set", json!({ "path": path, "value": value }));
-        return Ok(());
-    }
-
     if trimmed == "/sc game pause" || trimmed == "/sc game unpause" {
         let paused = trimmed.ends_with("pause") && !trimmed.ends_with("unpause");
         let snapshot = {
@@ -190,6 +170,44 @@ async fn run_startup_sc_command(
         let _ = state
             .persistence_tx
             .send(crate::server_state::PersistMessage::Save(snapshot));
+        return Ok(());
+    }
+
+    if let Some(raw) = trimmed.strip_prefix("/sc set queen.eggs ") {
+        let eggs = raw
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| anyhow!("queen.eggs must be an unsigned integer"))?;
+        let snapshot = {
+            let mut game = state.game.lock().await;
+            game.set_queen_eggs(eggs).map_err(anyhow::Error::msg)?;
+            let snapshot = game.snapshot();
+            let _ = game.take_patch();
+            snapshot
+        };
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
+        return Ok(());
+    }
+
+    if let Some(raw) = trimmed.strip_prefix("/sc set ") {
+        let mut parts = raw.splitn(2, ' ');
+        let path = parts.next().unwrap_or_default().trim();
+        let raw_value = parts.next().unwrap_or_default().trim();
+        if path.is_empty() || raw_value.is_empty() {
+            return Err(anyhow!("expected: /sc set <path> <value>"));
+        }
+        let value = parse_config_value(raw_value)?;
+        let snapshot = {
+            let mut game = state.game.lock().await;
+            game.set_config_value(path, value.clone()).map_err(anyhow::Error::msg)?;
+            let snapshot = game.snapshot();
+            let _ = game.take_patch();
+            snapshot
+        };
+        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        emit_log("startup_sc_set", json!({ "path": path, "value": value }));
         return Ok(());
     }
 

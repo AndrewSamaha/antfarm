@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/andrew/Development/antfarm/analysis/src/antfarm_visualizations/cli.py", line 28, in <module>
+  File "/Users/andrew/Development/antfarm/analysis/src/antfarm_visualizations/cli.py", line 23, in main
+  File "/Users/andrew/Development/antfarm/analysis/src/antfarm_visualizations/registry.py", line 13, in run_visualizations
+  File "/Users/andrew/Development/antfarm/analysis/src/antfarm_visualizations/cumulative_record.py", line 32, in render_cumulative_record
+  File "/Users/andrew/Development/antfarm/analysis/src/antfarm_visualizations/cumulative_record.py", line 84, in collect_condition_series
+  File "/Users/andrew/Development/antfarm/analysis/src/antfarm_visualizations/cumulative_record.py", line 96, in collect_run_series
+sqlite3.OperationalError: unable to open database file

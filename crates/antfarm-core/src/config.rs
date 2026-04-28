@@ -1,7 +1,8 @@
 use serde_json::{Map, Value, json};
 
 use crate::constants::{
-    DEFAULT_SOIL_SETTLE_FREQUENCY, DEFAULT_WORLD_MAX_DEPTH,
+    DEFAULT_PLANT_GROWTH_FREQUENCY, DEFAULT_SOIL_SETTLE_FREQUENCY,
+    DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE, DEFAULT_WORLD_MAX_DEPTH,
     DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, DEFAULT_WORLD_SEED, EGG_HATCH_TICKS,
     NPC_WORKER_LIFESPAN_TICKS, QUEEN_EGG_FOOD_COST,
 };
@@ -19,17 +20,25 @@ pub fn merge_with_default_config(config: Value) -> Value {
 fn default_config() -> Value {
     json!({
         "soil": {
-            "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY
+            "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY,
+            "plant_growth_frequency": DEFAULT_PLANT_GROWTH_FREQUENCY,
+            "vertical_growth_multiple": DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE
         },
         "colony": {
             "ambient_worker_count": 2,
+            "search_behavior_profile": "baseline",
+            "food_carry_max": 1,
             "worker_lifespan_ticks": NPC_WORKER_LIFESPAN_TICKS,
             "queen_egg_food_cost": QUEEN_EGG_FOOD_COST,
-            "egg_hatch_ticks": EGG_HATCH_TICKS,
+            "minimum_delay_to_hatch": EGG_HATCH_TICKS,
             "queen_delivery_radius": 5,
             "queen_no_fill_radius": 8,
             "dirt_place_cooldown_ticks": 11,
             "max_workers_per_hive": 0
+        },
+        "queen": {
+            "egg_laying_cooldown_ticks": 1,
+            "egg_hatch_cooldown_ticks": 0
         },
         "world": {
             "seed": DEFAULT_WORLD_SEED,
@@ -77,6 +86,10 @@ fn migrate_legacy_config(mut config: Value) -> Value {
     let terrain = root.remove("terrain");
     let ore = root.remove("ore");
     let food = root.remove("food");
+    let colony_egg_hatch_ticks = root
+        .get_mut("colony")
+        .and_then(Value::as_object_mut)
+        .and_then(|colony| colony.remove("egg_hatch_ticks"));
     let chunk_width = root
         .get_mut("world")
         .and_then(Value::as_object_mut)
@@ -92,6 +105,13 @@ fn migrate_legacy_config(mut config: Value) -> Value {
     }
     if let Some(food) = food {
         let _ = set_config_path(&mut config, "world.gen_params.food", food);
+    }
+    if let Some(colony_egg_hatch_ticks) = colony_egg_hatch_ticks {
+        let _ = set_config_path(
+            &mut config,
+            "colony.minimum_delay_to_hatch",
+            colony_egg_hatch_ticks,
+        );
     }
     if let Some(chunk_width) = chunk_width {
         let _ = set_config_path(&mut config, "world.gen_params.chunk_width", chunk_width);
@@ -192,6 +212,7 @@ pub fn merge_config(base: Value, incoming: Value) -> Value {
 
 fn merge_config_value(target: &mut Value, incoming: Value) {
     match (target, incoming) {
+        (_, Value::Null) => {}
         (Value::Object(target_map), Value::Object(incoming_map)) => {
             for (key, value) in incoming_map {
                 match target_map.get_mut(&key) {

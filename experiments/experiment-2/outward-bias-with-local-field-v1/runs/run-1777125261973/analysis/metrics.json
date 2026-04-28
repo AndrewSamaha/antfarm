@@ -1,0 +1,25 @@
+{
+  "experiment_dir": "/Users/andrew/Development/antfarm/experiments/experiment-2",
+  "metrics": {
+    "delivered_food": 4.0,
+    "delivered_food_per_day": 0.14814814814814814,
+    "final_day": 27.0,
+    "final_tick": 2624.0,
+    "found_food": 4.0,
+    "selected_move_count": 845.0,
+    "simulation_length": 940.0,
+    "steps_to_nth_food": {
+      "1": 52.0,
+      "2": 137.0,
+      "3": 18.0,
+      "4": 19.0
+    },
+    "steps_to_nth_queen": {
+      "1": 28.0,
+      "2": 20.0,
+      "3": 20.0,
+      "4": 21.0
+    }
+  },
+  "run_dir": "/Users/andrew/Development/antfarm/experiments/experiment-2/outward-bias-with-local-field-v1/runs/run-1777125261973"
+}

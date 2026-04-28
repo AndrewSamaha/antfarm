@@ -1,6 +1,8 @@
 config:
   soil:
-    settle_frequency: 0.00001
+    settle_frequency: 0.0001
+    plant_growth_frequency: 0.001
+    vertical_growth_multiple: 5.0
   colony:
     ambient_worker_count: 2
     worker_lifespan_ticks: 600
@@ -9,7 +11,12 @@ config:
     queen_delivery_radius: 5
     queen_no_fill_radius: 8
     dirt_place_cooldown_ticks: 11
-    max_workers_per_hive: 0
+    max_workers_per_hive: 30
+    search_behavior_profile: outward_bias_v1
+    minimum_delay_to_hatch: 5
+  queen:
+    egg_laying_cooldown_ticks: 5
+    egg_hatch_cooldown_ticks: 50
   world:
     seed: 7
     max_depth: -255
@@ -51,6 +58,8 @@ experiment:
   terminate_server_on_completion: false
   randomize_seed_from_datetime: false
   tick_millis:
+  analysis:
+    metrics: []
   stop_conditions:
     max_tick:
     max_day:

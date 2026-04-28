@@ -1,0 +1,23 @@
+{
+  "day": 80,
+  "delivered_food": 1494,
+  "egg_hatched": 125,
+  "egg_laid": 129,
+  "eggs": 4,
+  "found_food": 1531,
+  "players": 0,
+  "queens": 1,
+  "randomized_seed": 1777300741777,
+  "simulation_length": 6216,
+  "simulation_paused": true,
+  "start_tick": 1684,
+  "stop_reason": {
+    "MaxDay": 80
+  },
+  "tick": 7900,
+  "workers": 46,
+  "world": {
+    "height": 274,
+    "width": 160
+  }
+}

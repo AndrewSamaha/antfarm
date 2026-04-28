@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
-use antfarm_core::{DAY_TICKS, GameState, NpcKind, TICK_MILLIS};
+use antfarm_core::{DAY_TICKS, GameState, NpcKind, TICK_MILLIS, merge_config, set_config_path};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    process::Command,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
+
+use crate::logging::emit_log;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct ServerConfigFile {
@@ -32,6 +34,14 @@ pub(crate) struct StartupConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct StartupOverride {
+    pub(crate) paused: Option<bool>,
+    pub(crate) reset_world: Option<bool>,
+    pub(crate) load_gamestate: Option<String>,
+    pub(crate) sc_commands: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct ExperimentConfig {
     #[serde(default)]
     pub(crate) debug_log: bool,
@@ -42,7 +52,74 @@ pub(crate) struct ExperimentConfig {
     #[serde(default)]
     pub(crate) tick_millis: Option<u64>,
     #[serde(default)]
+    pub(crate) analysis: ExperimentAnalysisConfig,
+    #[serde(default)]
+    pub(crate) visualizations: Vec<ExperimentVisualizationSpec>,
+    #[serde(default)]
+    pub(crate) conditions: Vec<ExperimentCondition>,
+    #[serde(default)]
     pub(crate) stop_conditions: StopConditionExpr,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ExperimentCondition {
+    pub(crate) name: String,
+    #[serde(default = "default_condition_runs")]
+    pub(crate) runs: u32,
+    #[serde(default)]
+    pub(crate) parameter: Option<ExperimentConditionParameterSweep>,
+    #[serde(default)]
+    pub(crate) config: Value,
+    #[serde(default)]
+    pub(crate) startup: StartupOverride,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ExperimentConditionParameterSweep {
+    pub(crate) path: String,
+    pub(crate) values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ExperimentAnalysisConfig {
+    #[serde(default)]
+    pub(crate) metrics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ExperimentVisualizationSpec {
+    #[serde(rename = "type")]
+    pub(crate) type_name: String,
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) mode: String,
+    #[serde(default)]
+    pub(crate) x_metric: String,
+    #[serde(default)]
+    pub(crate) y_metric: String,
+    #[serde(default)]
+    pub(crate) x_aggregate: String,
+    #[serde(default)]
+    pub(crate) y_aggregate: String,
+    #[serde(default)]
+    pub(crate) metric: String,
+    #[serde(default)]
+    pub(crate) aggregate: String,
+    #[serde(default)]
+    pub(crate) event: String,
+    #[serde(default)]
+    pub(crate) x_axis: String,
+    #[serde(default)]
+    pub(crate) group_by: String,
+    #[serde(default)]
+    pub(crate) output: String,
+    #[serde(default)]
+    pub(crate) title: String,
+    #[serde(default)]
+    pub(crate) x_label: String,
+    #[serde(default)]
+    pub(crate) y_label: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,14 +154,41 @@ pub(crate) struct LoadedServerConfig {
     pub(crate) file: ServerConfigFile,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedServerConfig {
+    pub(crate) config: Value,
+    pub(crate) startup: StartupConfig,
+    pub(crate) experiment: ExperimentConfig,
+    pub(crate) condition_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConditionPlanEntry {
+    pub(crate) name: Option<String>,
+    pub(crate) runs: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ExpandedCondition {
+    name: String,
+    runs: u32,
+    config: Value,
+    startup: StartupOverride,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ExperimentRunContext {
     pub(crate) source_config_path: PathBuf,
+    pub(crate) experiment_dir: PathBuf,
+    pub(crate) condition_name: Option<String>,
     pub(crate) run_dir: PathBuf,
+    pub(crate) start_tick: u64,
     pub(crate) debug_log: bool,
     pub(crate) terminate_server_on_completion: bool,
     pub(crate) randomized_seed: Option<u64>,
     pub(crate) tick_millis: u64,
+    pub(crate) analysis_metrics: Vec<String>,
+    pub(crate) visualizations: Vec<ExperimentVisualizationSpec>,
     pub(crate) stop_conditions: StopConditionExpr,
     #[serde(skip_serializing)]
     pub(crate) finished: bool,
@@ -123,6 +227,7 @@ pub(crate) fn load_server_config(path_arg: Option<&str>) -> Result<LoadedServerC
 pub(crate) fn maybe_create_run_context(
     config_path: Option<&Path>,
     experiment_config: &ExperimentConfig,
+    condition_name: Option<&str>,
 ) -> Result<Option<ExperimentRunContext>> {
     let Some(config_path) = config_path else {
         return Ok(None);
@@ -137,7 +242,11 @@ pub(crate) fn maybe_create_run_context(
         return Ok(None);
     }
 
-    let run_dir = experiment_dir.join("runs").join(run_name()?);
+    let run_dir = if let Some(condition_name) = condition_name {
+        experiment_dir.join(condition_name).join("runs").join(run_name()?)
+    } else {
+        experiment_dir.join("runs").join(run_name()?)
+    };
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("create experiment run dir {}", run_dir.display()))?;
     fs::copy(config_path, run_dir.join("server.yaml")).with_context(|| {
@@ -150,16 +259,144 @@ pub(crate) fn maybe_create_run_context(
 
     let context = ExperimentRunContext {
         source_config_path: config_path.to_path_buf(),
+        experiment_dir: experiment_dir.to_path_buf(),
+        condition_name: condition_name.map(ToOwned::to_owned),
         run_dir: run_dir.clone(),
+        start_tick: 0,
         debug_log: experiment_config.debug_log,
         terminate_server_on_completion: experiment_config.terminate_server_on_completion,
         randomized_seed: None,
         tick_millis: experiment_config.tick_millis.unwrap_or(TICK_MILLIS).max(1),
+        analysis_metrics: experiment_config.analysis.metrics.clone(),
+        visualizations: experiment_config.visualizations.clone(),
         stop_conditions: experiment_config.stop_conditions.clone(),
         finished: false,
     };
     write_run_manifest(&context)?;
     Ok(Some(context))
+}
+
+pub(crate) fn resolve_server_config(
+    file: &ServerConfigFile,
+    condition_selector: Option<&str>,
+) -> Result<ResolvedServerConfig> {
+    if file.experiment.conditions.is_empty() {
+        let mut experiment = file.experiment.clone();
+        experiment.conditions.clear();
+        return Ok(ResolvedServerConfig {
+            config: file.config.clone(),
+            startup: file.startup.clone(),
+            experiment,
+            condition_name: None,
+        });
+    }
+
+    let selector = condition_selector.ok_or_else(|| {
+        anyhow::anyhow!(
+            "server config defines experiment.conditions; use --condition <name> or ./antfarm experiment"
+        )
+    })?;
+    let expanded_conditions = expand_conditions(file)?;
+    let condition = expanded_conditions
+        .iter()
+        .find(|condition| condition.name == selector)
+        .ok_or_else(|| anyhow::anyhow!("unknown condition: {selector}"))?;
+
+    let mut experiment = file.experiment.clone();
+    experiment.conditions.clear();
+
+    Ok(ResolvedServerConfig {
+        config: merge_config(file.config.clone(), condition.config.clone()),
+        startup: merge_startup(&file.startup, &condition.startup),
+        experiment,
+        condition_name: Some(condition.name.clone()),
+    })
+}
+
+pub(crate) fn condition_plan(file: &ServerConfigFile) -> Result<Vec<ConditionPlanEntry>> {
+    if file.experiment.conditions.is_empty() {
+        return Ok(vec![ConditionPlanEntry {
+            name: None,
+            runs: 1,
+        }]);
+    }
+
+    Ok(expand_conditions(file)?
+        .iter()
+        .map(|condition| ConditionPlanEntry {
+            name: Some(condition.name.clone()),
+            runs: condition.runs.max(1),
+        })
+        .collect())
+}
+
+fn expand_conditions(file: &ServerConfigFile) -> Result<Vec<ExpandedCondition>> {
+    let mut expanded = Vec::new();
+    for condition in &file.experiment.conditions {
+        match &condition.parameter {
+            Some(parameter) => {
+                if parameter.path.trim().is_empty() {
+                    anyhow::bail!(
+                        "condition {} has an empty parameter path",
+                        condition.name
+                    );
+                }
+                if parameter.values.is_empty() {
+                    anyhow::bail!(
+                        "condition {} has no parameter values",
+                        condition.name
+                    );
+                }
+                let parameter_key = parameter_key_segment(&parameter.path);
+                for value in &parameter.values {
+                    let mut condition_config = condition.config.clone();
+                    set_config_path(&mut condition_config, &parameter.path, value.clone())
+                        .map_err(anyhow::Error::msg)?;
+                    expanded.push(ExpandedCondition {
+                        name: format!(
+                            "{}__{}={}",
+                            condition.name,
+                            parameter_key,
+                            parameter_value_label(value)
+                        ),
+                        runs: condition.runs.max(1),
+                        config: condition_config,
+                        startup: condition.startup.clone(),
+                    });
+                }
+            }
+            None => expanded.push(ExpandedCondition {
+                name: condition.name.clone(),
+                runs: condition.runs.max(1),
+                config: condition.config.clone(),
+                startup: condition.startup.clone(),
+            }),
+        }
+    }
+    Ok(expanded)
+}
+
+fn parameter_key_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
+fn parameter_value_label(value: &Value) -> String {
+    let raw = match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(v) => v.to_string(),
+        Value::Number(v) => v.to_string(),
+        Value::String(v) => v.clone(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "value".to_string()),
+    };
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn stop_reason(stop_conditions: &StopConditionExpr, game: &GameState) -> Option<StopReason> {
@@ -209,7 +446,10 @@ pub(crate) fn write_run_result(
         .count();
     let summary = json!({
         "stop_reason": reason,
+        "randomized_seed": context.randomized_seed,
+        "start_tick": context.start_tick,
         "tick": game.tick,
+        "simulation_length": game.tick.saturating_sub(context.start_tick),
         "day": game.tick / DAY_TICKS + 1,
         "simulation_paused": game.simulation_paused,
         "found_food": game.found_food_count,
@@ -230,7 +470,26 @@ pub(crate) fn write_run_result(
         serde_json::to_vec_pretty(&summary)?,
     )
     .with_context(|| format!("write experiment result {}", context.run_dir.join("result.json").display()))?;
-    write_experiment_results_html(context)?;
+    emit_log(
+        "experiment_run_finished",
+        json!({
+            "run_dir": context.run_dir.display().to_string(),
+            "experiment_dir": context.experiment_dir.display().to_string(),
+            "condition": context.condition_name,
+            "stop_reason": reason,
+            "tick": game.tick,
+            "simulation_length": game.tick.saturating_sub(context.start_tick),
+        }),
+    );
+    if let Err(error) = run_post_run_analysis(context) {
+        write_analysis_error(context, "post_run_error.txt", &error.to_string())?;
+    }
+    if let Err(error) = run_experiment_aggregation(context) {
+        write_analysis_error(context, "aggregation_error.txt", &error.to_string())?;
+    }
+    if let Err(error) = run_experiment_visualizations(context) {
+        write_analysis_error(context, "visualization_error.txt", &error.to_string())?;
+    }
     Ok(())
 }
 
@@ -241,11 +500,16 @@ pub(crate) fn persist_run_manifest(context: &ExperimentRunContext) -> Result<()>
 fn write_run_manifest(context: &ExperimentRunContext) -> Result<()> {
     let manifest = json!({
         "source_config_path": context.source_config_path.display().to_string(),
+        "experiment_dir": context.experiment_dir.display().to_string(),
+        "condition_name": context.condition_name,
         "run_dir": context.run_dir.display().to_string(),
+        "start_tick": context.start_tick,
         "debug_log": context.debug_log,
         "terminate_server_on_completion": context.terminate_server_on_completion,
         "randomized_seed": context.randomized_seed,
         "tick_millis": context.tick_millis,
+        "analysis_metrics": context.analysis_metrics,
+        "visualizations": context.visualizations,
         "stop_conditions": context.stop_conditions,
     });
     fs::write(
@@ -256,247 +520,242 @@ fn write_run_manifest(context: &ExperimentRunContext) -> Result<()> {
     Ok(())
 }
 
-fn write_experiment_results_html(context: &ExperimentRunContext) -> Result<()> {
+fn merge_startup(base: &StartupConfig, override_config: &StartupOverride) -> StartupConfig {
+    StartupConfig {
+        paused: override_config.paused.unwrap_or(base.paused),
+        reset_world: override_config.reset_world.unwrap_or(base.reset_world),
+        load_gamestate: override_config
+            .load_gamestate
+            .clone()
+            .or_else(|| base.load_gamestate.clone()),
+        sc_commands: override_config
+            .sc_commands
+            .clone()
+            .unwrap_or_else(|| base.sc_commands.clone()),
+    }
+}
+
+fn default_condition_runs() -> u32 {
+    1
+}
+
+fn run_post_run_analysis(context: &ExperimentRunContext) -> Result<()> {
+    if context.analysis_metrics.is_empty() {
+        return Ok(());
+    }
     let Some(experiment_dir) = context.source_config_path.parent() else {
         return Ok(());
     };
-    let runs_dir = experiment_dir.join("runs");
-    if !runs_dir.exists() {
+    let Some(experiments_dir) = experiment_dir.parent() else {
         return Ok(());
+    };
+    let Some(repo_root) = experiments_dir.parent() else {
+        return Ok(());
+    };
+
+    let analysis_dir = context.run_dir.join("analysis");
+    fs::create_dir_all(&analysis_dir)
+        .with_context(|| format!("create run analysis dir {}", analysis_dir.display()))?;
+
+    let mut command = Command::new("uv");
+    command
+        .current_dir(repo_root)
+        .arg("run")
+        .arg("--project")
+        .arg("analysis")
+        .arg("python")
+        .arg("-m")
+        .arg("antfarm_metrics.cli")
+        .arg("--experiment-dir")
+        .arg(experiment_dir)
+        .arg("--run-dir")
+        .arg(&context.run_dir);
+    for metric in &context.analysis_metrics {
+        command.arg("--metric").arg(metric);
     }
 
-    let mut run_count = 0usize;
-    let mut stop_reason_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut metrics: BTreeMap<String, MetricSamples> = BTreeMap::new();
-
-    for entry in fs::read_dir(&runs_dir)
-        .with_context(|| format!("read experiment runs dir {}", runs_dir.display()))?
-    {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let result_path = entry.path().join("result.json");
-        if !result_path.exists() {
-            continue;
-        }
-        let raw = fs::read_to_string(&result_path)
-            .with_context(|| format!("read experiment result {}", result_path.display()))?;
-        let result: Value = serde_json::from_str(&raw)
-            .with_context(|| format!("parse experiment result {}", result_path.display()))?;
-        run_count = run_count.saturating_add(1);
-
-        if let Some(stop_reason) = result.get("stop_reason") {
-            let label = stop_reason_label(stop_reason);
-            *stop_reason_counts.entry(label).or_default() += 1;
-        }
-        collect_numeric_metrics(None, &result, &mut metrics);
-    }
-
-    let html = render_experiment_results_html(
-        experiment_dir,
-        run_count,
-        &stop_reason_counts,
-        &metrics,
+    emit_log(
+        "experiment_analysis_started",
+        json!({
+            "run_dir": context.run_dir.display().to_string(),
+            "experiment_dir": experiment_dir.display().to_string(),
+            "condition": context.condition_name,
+            "metrics": context.analysis_metrics,
+        }),
     );
-    fs::write(experiment_dir.join("results.html"), html)
-        .with_context(|| format!("write experiment summary {}", experiment_dir.join("results.html").display()))?;
+    let started = Instant::now();
+    let output = command
+        .output()
+        .with_context(|| format!("run experiment analysis hook for {}", context.run_dir.display()))?;
+
+    fs::write(analysis_dir.join("stdout.log"), &output.stdout)
+        .with_context(|| format!("write analysis stdout {}", analysis_dir.join("stdout.log").display()))?;
+    fs::write(analysis_dir.join("stderr.log"), &output.stderr)
+        .with_context(|| format!("write analysis stderr {}", analysis_dir.join("stderr.log").display()))?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "analysis hook exited with status {}",
+            output.status
+        );
+    }
+    emit_log(
+        "experiment_analysis_finished",
+        json!({
+            "run_dir": context.run_dir.display().to_string(),
+            "experiment_dir": experiment_dir.display().to_string(),
+            "condition": context.condition_name,
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "status": output.status.code(),
+        }),
+    );
     Ok(())
 }
 
-#[derive(Default)]
-struct MetricSamples {
-    values: Vec<f64>,
-    labels: Vec<String>,
-}
-
-fn collect_numeric_metrics(
-    prefix: Option<&str>,
-    value: &Value,
-    metrics: &mut BTreeMap<String, MetricSamples>,
-) {
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                let next = match prefix {
-                    Some(prefix) => format!("{prefix}.{key}"),
-                    None => key.clone(),
-                };
-                collect_numeric_metrics(Some(&next), child, metrics);
-            }
-        }
-        Value::Number(number) => {
-            let Some(metric_name) = prefix else {
-                return;
-            };
-            if let Some(as_f64) = number.as_f64() {
-                let entry = metrics.entry(metric_name.to_string()).or_default();
-                entry.values.push(as_f64);
-                entry.labels.push(number.to_string());
-            }
-        }
-        Value::Array(_) | Value::String(_) | Value::Bool(_) | Value::Null => {}
-    }
-}
-
-fn render_experiment_results_html(
-    experiment_dir: &Path,
-    run_count: usize,
-    stop_reason_counts: &BTreeMap<String, usize>,
-    metrics: &BTreeMap<String, MetricSamples>,
-) -> String {
-    let experiment_name = experiment_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("experiment");
-    let mut metrics_rows = String::new();
-    for (metric, samples) in metrics {
-        if samples.values.is_empty() {
-            continue;
-        }
-        let stats = compute_stats(samples);
-        metrics_rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            html_escape(metric),
-            stats.sample_count,
-            format_number(stats.min),
-            format_number(stats.max),
-            format_number(stats.mean),
-            format_number(stats.median),
-            html_escape(&stats.mode),
-        ));
-    }
-    if metrics_rows.is_empty() {
-        metrics_rows.push_str("<tr><td colspan=\"7\">No numeric metrics found.</td></tr>");
-    }
-
-    let mut stop_reason_rows = String::new();
-    for (reason, count) in stop_reason_counts {
-        stop_reason_rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td></tr>",
-            html_escape(reason),
-            count
-        ));
-    }
-    if stop_reason_rows.is_empty() {
-        stop_reason_rows.push_str("<tr><td colspan=\"2\">No completed runs yet.</td></tr>");
-    }
-
-    format!(
-        "<!doctype html>\
-<html lang=\"en\">\
-<head>\
-<meta charset=\"utf-8\">\
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>{title}</title>\
-<style>\
-body {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; color: #111; background: #faf8f2; }}\
-h1, h2 {{ margin: 0 0 12px; }}\
-p {{ margin: 0 0 16px; }}\
-table {{ border-collapse: collapse; width: 100%; margin: 0 0 24px; background: white; }}\
-th, td {{ border: 1px solid #d7d0c3; padding: 8px 10px; text-align: left; vertical-align: top; }}\
-th {{ background: #efe7d8; }}\
-code {{ background: #efe7d8; padding: 1px 4px; }}\
-</style>\
-</head>\
-<body>\
-<h1>{title}</h1>\
-<p>Samples: <strong>{run_count}</strong></p>\
-<h2>Stop Reasons</h2>\
-<table>\
-<thead><tr><th>Reason</th><th>Count</th></tr></thead>\
-<tbody>{stop_reason_rows}</tbody>\
-</table>\
-<h2>Metric Statistics</h2>\
-<table>\
-<thead><tr><th>Metric</th><th>Samples</th><th>Min</th><th>Max</th><th>Average</th><th>Median</th><th>Mode</th></tr></thead>\
-<tbody>{metrics_rows}</tbody>\
-</table>\
-</body>\
-</html>",
-        title = html_escape(&format!("Experiment Results: {experiment_name}")),
-        run_count = run_count,
-        stop_reason_rows = stop_reason_rows,
-        metrics_rows = metrics_rows,
-    )
-}
-
-struct MetricStats {
-    sample_count: usize,
-    min: f64,
-    max: f64,
-    mean: f64,
-    median: f64,
-    mode: String,
-}
-
-fn compute_stats(samples: &MetricSamples) -> MetricStats {
-    let mut sorted = samples.values.clone();
-    sorted.sort_by(f64::total_cmp);
-    let sample_count = sorted.len();
-    let min = *sorted.first().unwrap_or(&0.0);
-    let max = *sorted.last().unwrap_or(&0.0);
-    let sum: f64 = sorted.iter().sum();
-    let mean = if sample_count == 0 {
-        0.0
-    } else {
-        sum / sample_count as f64
+fn run_experiment_aggregation(context: &ExperimentRunContext) -> Result<()> {
+    let experiment_dir = &context.experiment_dir;
+    let Some(experiments_dir) = experiment_dir.parent() else {
+        return Ok(());
     };
-    let median = if sample_count == 0 {
-        0.0
-    } else if sample_count % 2 == 1 {
-        sorted[sample_count / 2]
-    } else {
-        (sorted[sample_count / 2 - 1] + sorted[sample_count / 2]) / 2.0
+    let Some(repo_root) = experiments_dir.parent() else {
+        return Ok(());
     };
 
-    let mut frequencies: BTreeMap<&str, usize> = BTreeMap::new();
-    for label in &samples.labels {
-        *frequencies.entry(label.as_str()).or_default() += 1;
+    let analysis_dir = context.run_dir.join("analysis");
+    fs::create_dir_all(&analysis_dir)
+        .with_context(|| format!("create run analysis dir {}", analysis_dir.display()))?;
+
+    let mut targets = Vec::new();
+    if let Some(condition_name) = &context.condition_name {
+        targets.push(experiment_dir.join(condition_name));
     }
-    let max_frequency = frequencies.values().copied().max().unwrap_or(0);
-    let mode = if max_frequency <= 1 {
-        "none".to_string()
-    } else {
-        frequencies
-            .into_iter()
-            .filter_map(|(label, count)| (count == max_frequency).then_some(label.to_string()))
-            .collect::<Vec<_>>()
-            .join(", ")
+    targets.push(experiment_dir.clone());
+
+    for (index, target_dir) in targets.into_iter().enumerate() {
+        let scope = if index == 0 && context.condition_name.is_some() {
+            "condition"
+        } else {
+            "experiment"
+        };
+        emit_log(
+            "experiment_aggregation_started",
+            json!({
+                "run_dir": context.run_dir.display().to_string(),
+                "experiment_dir": experiment_dir.display().to_string(),
+                "condition": context.condition_name,
+                "target_dir": target_dir.display().to_string(),
+                "scope": scope,
+            }),
+        );
+        let started = Instant::now();
+        let output = Command::new("uv")
+            .current_dir(repo_root)
+            .arg("run")
+            .arg("--project")
+            .arg("analysis")
+            .arg("python")
+            .arg("-m")
+            .arg("antfarm_aggregation.cli")
+            .arg("--experiment-dir")
+            .arg(&target_dir)
+            .output()
+            .with_context(|| format!("run experiment aggregation hook for {}", target_dir.display()))?;
+
+        let suffix = scope;
+        fs::write(analysis_dir.join(format!("aggregation_{suffix}_stdout.log")), &output.stdout)
+            .with_context(|| format!("write aggregation stdout for {}", target_dir.display()))?;
+        fs::write(analysis_dir.join(format!("aggregation_{suffix}_stderr.log")), &output.stderr)
+            .with_context(|| format!("write aggregation stderr for {}", target_dir.display()))?;
+
+        if !output.status.success() {
+            anyhow::bail!("aggregation hook exited with status {}", output.status);
+        }
+        emit_log(
+            "experiment_aggregation_finished",
+            json!({
+                "run_dir": context.run_dir.display().to_string(),
+                "experiment_dir": experiment_dir.display().to_string(),
+                "condition": context.condition_name,
+                "target_dir": target_dir.display().to_string(),
+                "scope": scope,
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "status": output.status.code(),
+            }),
+        );
+    }
+    Ok(())
+}
+
+fn run_experiment_visualizations(context: &ExperimentRunContext) -> Result<()> {
+    if context.visualizations.is_empty() {
+        return Ok(());
+    }
+    let experiment_dir = &context.experiment_dir;
+    let Some(experiments_dir) = experiment_dir.parent() else {
+        return Ok(());
+    };
+    let Some(repo_root) = experiments_dir.parent() else {
+        return Ok(());
     };
 
-    MetricStats {
-        sample_count,
-        min,
-        max,
-        mean,
-        median,
-        mode,
+    let analysis_dir = context.run_dir.join("analysis");
+    fs::create_dir_all(&analysis_dir)
+        .with_context(|| format!("create run analysis dir {}", analysis_dir.display()))?;
+
+    emit_log(
+        "experiment_visualizations_started",
+        json!({
+            "run_dir": context.run_dir.display().to_string(),
+            "experiment_dir": experiment_dir.display().to_string(),
+            "condition": context.condition_name,
+            "visualization_count": context.visualizations.len(),
+        }),
+    );
+    let started = Instant::now();
+    let output = Command::new("uv")
+        .current_dir(repo_root)
+        .arg("run")
+        .arg("--project")
+        .arg("analysis")
+        .arg("python")
+        .arg("-m")
+        .arg("antfarm_visualizations.cli")
+        .arg("--experiment-dir")
+        .arg(experiment_dir)
+        .arg("--run-dir")
+        .arg(&context.run_dir)
+        .output()
+        .with_context(|| format!("run experiment visualization hook for {}", experiment_dir.display()))?;
+
+    fs::write(analysis_dir.join("visualization_stdout.log"), &output.stdout)
+        .with_context(|| format!("write visualization stdout for {}", experiment_dir.display()))?;
+    fs::write(analysis_dir.join("visualization_stderr.log"), &output.stderr)
+        .with_context(|| format!("write visualization stderr for {}", experiment_dir.display()))?;
+
+    if !output.status.success() {
+        anyhow::bail!("visualization hook exited with status {}", output.status);
     }
+    emit_log(
+        "experiment_visualizations_finished",
+        json!({
+            "run_dir": context.run_dir.display().to_string(),
+            "experiment_dir": experiment_dir.display().to_string(),
+            "condition": context.condition_name,
+            "visualization_count": context.visualizations.len(),
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "status": output.status.code(),
+        }),
+    );
+    Ok(())
 }
 
-fn stop_reason_label(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        _ => serde_json::to_string(value).unwrap_or_else(|_| "unknown".to_string()),
-    }
-}
-
-fn format_number(value: f64) -> String {
-    if (value.fract()).abs() < f64::EPSILON {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.3}")
-    }
-}
-
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\"', "&quot;")
-        .replace('\'', "&#39;")
+fn write_analysis_error(context: &ExperimentRunContext, filename: &str, message: &str) -> Result<()> {
+    let analysis_dir = context.run_dir.join("analysis");
+    fs::create_dir_all(&analysis_dir)
+        .with_context(|| format!("create run analysis dir {}", analysis_dir.display()))?;
+    fs::write(analysis_dir.join(filename), message)
+        .with_context(|| format!("write analysis error {}", analysis_dir.join(filename).display()))?;
+    Ok(())
 }
 
 pub(crate) fn debug_log_path(context: &ExperimentRunContext) -> PathBuf {

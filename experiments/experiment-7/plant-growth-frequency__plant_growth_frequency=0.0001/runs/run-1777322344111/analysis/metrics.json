@@ -1,0 +1,43 @@
+{
+  "experiment_dir": "/Users/andrew/Development/antfarm/experiments/experiment-7",
+  "metrics": {
+    "delivered_food": 148.0,
+    "delivered_food_per_day": 2.0273972602739727,
+    "final_day": 73.0,
+    "final_tick": 7251.0,
+    "found_food": 157.0,
+    "selected_move_count": 60389.0,
+    "simulation_length": 5567.0,
+    "steps_to_nth_food": {
+      "1": 123.7872340425532,
+      "10": 60.0,
+      "11": 29.5,
+      "12": 108.0,
+      "13": 24.0,
+      "2": 52.90909090909091,
+      "3": 64.81818181818181,
+      "4": 49.785714285714285,
+      "5": 42.8,
+      "6": 83.0,
+      "7": 42.833333333333336,
+      "8": 29.666666666666668,
+      "9": 62.4
+    },
+    "steps_to_nth_queen": {
+      "1": 52.31111111111111,
+      "10": 29.5,
+      "11": 36.0,
+      "12": 16.0,
+      "13": 24.0,
+      "2": 46.5,
+      "3": 48.666666666666664,
+      "4": 24.5,
+      "5": 29.7,
+      "6": 31.666666666666668,
+      "7": 40.5,
+      "8": 21.5,
+      "9": 101.0
+    }
+  },
+  "run_dir": "/Users/andrew/Development/antfarm/experiments/experiment-7/plant-growth-frequency__plant_growth_frequency=0.0001/runs/run-1777322344111"
+}

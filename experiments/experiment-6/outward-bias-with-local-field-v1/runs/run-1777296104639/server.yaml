@@ -1,0 +1,122 @@
+config:
+  soil:
+    vertical_growth_multiple: 2.0
+  colony:
+    ambient_worker_count: 0
+    search_behavior_profile: baseline
+    worker_lifespan_ticks: 600
+    queen_egg_food_cost: 2
+    max_workers_per_hive: 50
+    minimum_delay_to_hatch: 5
+  queen:
+    egg_laying_cooldown_ticks: 10
+    egg_hatch_cooldown_ticks: 50
+
+startup:
+  paused: true
+  reset_world: false
+  load_gamestate: "experiment 1"
+  sc_commands:
+    - /sc kill @e[type=worker,hive=none]
+    - /sc set colony.minimum_delay_to_hatch 5
+    - /sc set queen.egg_laying_cooldown_ticks 5
+    - /sc set queen.egg_hatch_cooldown_ticks 50
+    - /sc set queen.eggs 10
+    - /sc set soil.plant_growth_frequency 0.005
+    - /sc game unpause
+
+experiment:
+  debug_log: true
+  terminate_server_on_completion: true
+  randomize_seed_from_datetime: true
+  tick_millis: 1
+  analysis:
+    metrics:
+      - simulation_length
+      - final_day
+      - final_tick
+      - found_food
+      - delivered_food
+      - delivered_food_per_day
+      - selected_move_count
+      - steps_to_nth_food
+      - steps_to_nth_queen
+  visualizations:
+    - type: cumulative_record
+      name: food-pickups-by-condition
+      mode: staircase
+      event: found_food
+      x_axis: tick
+      group_by: condition
+      output: food-pickups-by-condition.png
+      title: "Cumulative Food Pickups by Condition"
+      x_label: "Tick"
+      y_label: "Cumulative Food Pickups"
+    - type: cumulative_record
+      name: smooth-food-pickups-by-condition
+      mode: smooth
+      event: found_food
+      x_axis: tick
+      group_by: condition
+      output: smooth-food-pickups-by-condition.png
+      title: "Cumulative Food Pickups by Condition"
+      x_label: "Tick"
+      y_label: "Cumulative Food Pickups"
+    - type: cumulative_record
+      name: worker-count-by-condition
+      mode: staircase
+      event: worker_count
+      x_axis: tick
+      group_by: condition
+      output: worker-count-by-condition.png
+      title: "Worker Count by Condition"
+      x_label: "Tick"
+      y_label: "Worker Ants"
+    - type: scatter_plot
+      name: steps-to-first-food-vs-found-food
+      x_metric: steps_to_nth_food.1
+      y_metric: found_food
+      group_by: condition
+      output: steps-to-first-food-vs-found-food.png
+      title: "Steps to 1st Food vs Found Food"
+      x_label: "Steps to 1st Food"
+      y_label: "Found Food"
+    - type: scatter_plot
+      name: median-steps-to-first-food-vs-median-found-food
+      x_metric: steps_to_nth_food.1
+      y_metric: found_food
+      x_aggregate: median
+      y_aggregate: median
+      group_by: condition
+      output: median-steps-to-first-food-vs-median-found-food.png
+      title: "Median Steps to 1st Food vs Median Found Food"
+      x_label: "Median Steps to 1st Food"
+      y_label: "Median Found Food"
+    - type: bar_chart_horizontal
+      name: median-steps-to-first-food-by-condition
+      metric: steps_to_nth_food.1
+      aggregate: median
+      group_by: condition
+      output: median-steps-to-first-food-by-condition.png
+      title: "Median Steps to 1st Food by Condition"
+      x_label: "Median Steps to 1st Food"
+      y_label: "Condition"
+  conditions:
+    - name: outward-bias-v1
+      runs: 5
+      config:
+        colony:
+          search_behavior_profile: outward_bias_v1
+          food_carry_max: 1
+    - name: outward-bias-with-local-field-v1
+      runs: 5
+      config:
+        colony:
+          search_behavior_profile: outward_bias_v1
+          food_carry_max: 3
+  stop_conditions:
+    or:
+      - max_day: 100
+      - and:
+        - all_workers_dead: true
+        - no_eggs: true

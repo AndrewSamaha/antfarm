@@ -1,0 +1,140 @@
+{
+  "analysis_metrics": [
+    "simulation_length",
+    "final_day",
+    "final_tick",
+    "found_food",
+    "delivered_food",
+    "delivered_food_per_day",
+    "selected_move_count",
+    "steps_to_nth_food",
+    "steps_to_nth_queen"
+  ],
+  "condition_name": "outward-bias-with-local-field-v1",
+  "debug_log": true,
+  "experiment_dir": "./experiments/experiment-3",
+  "randomized_seed": 1777127081300,
+  "run_dir": "./experiments/experiment-3/outward-bias-with-local-field-v1/runs/run-1777127081299",
+  "source_config_path": "./experiments/experiment-3/server.yaml",
+  "start_tick": 1684,
+  "stop_conditions": {
+    "or": [
+      {
+        "all_workers_dead": false,
+        "max_day": 60,
+        "max_tick": null,
+        "no_eggs": false
+      },
+      {
+        "and": [
+          {
+            "all_workers_dead": true,
+            "max_day": null,
+            "max_tick": null,
+            "no_eggs": false
+          },
+          {
+            "all_workers_dead": false,
+            "max_day": null,
+            "max_tick": null,
+            "no_eggs": true
+          }
+        ]
+      }
+    ]
+  },
+  "terminate_server_on_completion": true,
+  "tick_millis": 1,
+  "visualizations": [
+    {
+      "aggregate": "",
+      "event": "found_food",
+      "group_by": "condition",
+      "metric": "",
+      "mode": "staircase",
+      "name": "food-pickups-by-condition",
+      "output": "food-pickups-by-condition.png",
+      "title": "Cumulative Food Pickups by Condition",
+      "type": "cumulative_record",
+      "x_aggregate": "",
+      "x_axis": "tick",
+      "x_label": "Tick",
+      "x_metric": "",
+      "y_aggregate": "",
+      "y_label": "Cumulative Food Pickups",
+      "y_metric": ""
+    },
+    {
+      "aggregate": "",
+      "event": "found_food",
+      "group_by": "condition",
+      "metric": "",
+      "mode": "smooth",
+      "name": "smooth-food-pickups-by-condition",
+      "output": "smooth-food-pickups-by-condition.png",
+      "title": "Cumulative Food Pickups by Condition",
+      "type": "cumulative_record",
+      "x_aggregate": "",
+      "x_axis": "tick",
+      "x_label": "Tick",
+      "x_metric": "",
+      "y_aggregate": "",
+      "y_label": "Cumulative Food Pickups",
+      "y_metric": ""
+    },
+    {
+      "aggregate": "",
+      "event": "",
+      "group_by": "condition",
+      "metric": "",
+      "mode": "",
+      "name": "steps-to-first-food-vs-found-food",
+      "output": "steps-to-first-food-vs-found-food.png",
+      "title": "Steps to 1st Food vs Found Food",
+      "type": "scatter_plot",
+      "x_aggregate": "",
+      "x_axis": "",
+      "x_label": "Steps to 1st Food",
+      "x_metric": "steps_to_nth_food.1",
+      "y_aggregate": "",
+      "y_label": "Found Food",
+      "y_metric": "found_food"
+    },
+    {
+      "aggregate": "",
+      "event": "",
+      "group_by": "condition",
+      "metric": "",
+      "mode": "",
+      "name": "median-steps-to-first-food-vs-median-found-food",
+      "output": "median-steps-to-first-food-vs-median-found-food.png",
+      "title": "Median Steps to 1st Food vs Median Found Food",
+      "type": "scatter_plot",
+      "x_aggregate": "median",
+      "x_axis": "",
+      "x_label": "Median Steps to 1st Food",
+      "x_metric": "steps_to_nth_food.1",
+      "y_aggregate": "median",
+      "y_label": "Median Found Food",
+      "y_metric": "found_food"
+    },
+    {
+      "aggregate": "median",
+      "event": "",
+      "group_by": "condition",
+      "metric": "steps_to_nth_food.1",
+      "mode": "",
+      "name": "median-steps-to-first-food-by-condition",
+      "output": "median-steps-to-first-food-by-condition.png",
+      "title": "Median Steps to 1st Food by Condition",
+      "type": "bar_chart_horizontal",
+      "x_aggregate": "",
+      "x_axis": "",
+      "x_label": "Median Steps to 1st Food",
+      "x_metric": "",
+      "y_aggregate": "",
+      "y_label": "Condition",
+      "y_metric": ""
+    }
+  ]
+}

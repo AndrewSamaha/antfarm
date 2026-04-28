@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./antfarm client [player-name]
+  ./antfarm server [server args...]
+  ./antfarm experiment --server-config <path> [--num-runs <n>] [server args...]
+  ./antfarm visualizations --server-config <path-or-dir>
+
+Commands:
+  client
+    Run one terminal client. The player name is optional and defaults to worker-ant.
+
+  server
+    Run one antfarm server process. By default this reads ./server.yaml from your current directory.
+
+  experiment
+    Run the same experiment config multiple times by repeatedly launching the server.
+    This expects the experiment config to terminate the server on completion.
+
+  visualizations
+    Regenerate an experiment's visualizations and refresh results.html from the current server.yaml.
+
+Examples:
+  ./antfarm client
+  ./antfarm client scout
+  ./antfarm server
+  ./antfarm server --server-config ./experiments/experiment-1/server.yaml
+  ./antfarm server --server-config ./experiments/experiment-1
+  ./antfarm server --server-config ./experiments/experiment-1/server.yaml --condition baseline
+  ./antfarm experiment --server-config ./experiments/experiment-1/server.yaml --num-runs 10
+  ./antfarm experiment --server-config ./experiments/experiment-1 --num-runs 10
+  ./antfarm visualizations --server-config ./experiments/experiment-4
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+command="$1"
+shift
+
+case "$command" in
+  client)
+    exec "$ROOT_DIR/scripts/client.sh" "$@"
+    ;;
+  server)
+    exec "$ROOT_DIR/scripts/server.sh" "$@"
+    ;;
+  experiment)
+    exec "$ROOT_DIR/scripts/experiment.sh" "$@"
+    ;;
+  visualizations)
+    exec "$ROOT_DIR/scripts/visualizations.sh" "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "unknown command: $command" >&2
+    usage
+    exit 1
+    ;;
+esac

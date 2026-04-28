@@ -1,12 +1,14 @@
 use rand::Rng;
 use serde_json::{Value, json};
+use std::collections::{HashSet, VecDeque};
 
 const RECENT_POSITION_MEMORY_SIZE: usize = 5;
 
 use crate::{
-    config::{config_i32, config_u16, config_u64},
+    config::{config_f64, config_i32, config_u16, config_u64},
     constants::{
-        DEFAULT_SOIL_SETTLE_FREQUENCY, EGG_HATCH_TICKS, NPC_WORKER_LIFESPAN_TICKS,
+        DEFAULT_PLANT_GROWTH_FREQUENCY, DEFAULT_SOIL_SETTLE_FREQUENCY,
+        DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE, EGG_HATCH_TICKS, NPC_WORKER_LIFESPAN_TICKS,
         PHEROMONE_DECAY_AMOUNT,
         PHEROMONE_DECAY_INTERVAL_TICKS, PHEROMONE_MEMORY_RADIUS, PHEROMONE_MEMORY_TICKS,
         QUEEN_EGG_FOOD_COST, QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS, SURFACE_Y,
@@ -21,10 +23,20 @@ use crate::{
 
 use super::GameState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchBehaviorProfile {
+    Baseline,
+    OutwardBiasV1,
+    LocalFieldV1,
+    LocalFieldV2,
+    OutwardBiasWithLocalFieldV1,
+}
+
 impl GameState {
     pub fn tick(&mut self) {
         self.tick += 1;
         self.tick_soil_settling();
+        self.tick_plant_growth();
         if self.tick % PHEROMONE_DECAY_INTERVAL_TICKS == 0 {
             self.pheromones.decay_all(PHEROMONE_DECAY_AMOUNT);
         }
@@ -101,6 +113,28 @@ impl GameState {
                 .map(|hive_id| self.pheromones.value(npc_pos, hive_id, PheromoneChannel::Food))
                 .unwrap_or(0),
         );
+        let search_profile = self.search_behavior_profile();
+        let effective_search_profile =
+            self.effective_search_behavior_profile(index, search_profile);
+        let food_carry_max = self.food_carry_max();
+        let carry_visible_food_targets = if behavior == AntBehaviorState::Searching
+            && self.npcs[index].carrying_food
+            && self.npcs[index].food < food_carry_max
+        {
+            self.adjacent_food_positions(npc_pos)
+        } else {
+            Vec::new()
+        };
+        let search_destination = match (behavior, effective_search_profile, npc_hive) {
+            (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(hive_id)) => {
+                self.refresh_local_field_destination(index, hive_id, queen_pos)
+            }
+            _ => {
+                self.npcs[index].search_destination = None;
+                self.npcs[index].search_destination_stuck_ticks = 0;
+                None
+            }
+        };
 
         if let Some(hive_id) = npc_hive {
             match behavior {
@@ -175,6 +209,54 @@ impl GameState {
                 AntBehaviorState::ReturningFood => direction_bias(self.npcs[index].recent_home_dir, npc_pos, next),
                 AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
             });
+            let search_profile_bias = match (behavior, effective_search_profile, queen_pos) {
+                (AntBehaviorState::Searching, SearchBehaviorProfile::OutwardBiasV1, Some(queen_pos)) => {
+                    let current = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
+                    let next_dist = (queen_pos.x - next.x).abs() + (queen_pos.y - next.y).abs();
+                    if next_dist > current {
+                        80_u32
+                    } else if next_dist == current {
+                        8_u32
+                    } else {
+                        0_u32
+                    }
+                }
+                _ => 0_u32,
+            };
+            let local_field_search = match (behavior, effective_search_profile, npc_hive) {
+                (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV1, Some(hive_id))
+                | (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(hive_id)) => {
+                    Some(self.local_field_search_bias(next, hive_id))
+                }
+                _ => None,
+            };
+            let destination_bias = match (behavior, effective_search_profile, search_destination) {
+                (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(destination)) => {
+                    local_field_destination_bias(npc_pos, next, destination)
+                }
+                _ => 0_u32,
+            };
+            let carry_harvest_bias = if !carry_visible_food_targets.is_empty() {
+                let current_best = carry_visible_food_targets
+                    .iter()
+                    .map(|target| manhattan_distance(npc_pos, *target))
+                    .min()
+                    .unwrap_or(0);
+                let next_best = carry_visible_food_targets
+                    .iter()
+                    .map(|target| manhattan_distance(next, *target))
+                    .min()
+                    .unwrap_or(current_best);
+                if next_best < current_best {
+                    160_u32
+                } else if next_best == current_best {
+                    16_u32
+                } else {
+                    0_u32
+                }
+            } else {
+                0_u32
+            };
             let recent_position_penalty = recent_position_penalty(&self.npcs[index].recent_positions, next);
             raw_candidates.push((
                 next,
@@ -185,6 +267,10 @@ impl GameState {
                 tile_bonus,
                 queen_bias,
                 memory_bias,
+                search_profile_bias,
+                local_field_search,
+                destination_bias,
+                carry_harvest_bias,
                 recent_position_penalty,
             ));
         }
@@ -192,7 +278,7 @@ impl GameState {
         let has_increasing_adjacent_food_signal = matches!(behavior, AntBehaviorState::Searching)
             && raw_candidates
                 .iter()
-                .any(|(_, _, food_pheromone, _, _, _, _, _, _)| *food_pheromone > current_food_pheromone);
+                .any(|(_, _, food_pheromone, _, _, _, _, _, _, _, _, _, _)| *food_pheromone > current_food_pheromone);
 
         let mut candidates = Vec::new();
         let mut candidate_logs = Vec::new();
@@ -205,10 +291,22 @@ impl GameState {
             tile_bonus,
             queen_bias,
             memory_bias,
+            search_profile_bias,
+            local_field_search,
+            destination_bias,
+            carry_harvest_bias,
             recent_position_penalty,
         ) in raw_candidates
         {
             let pheromone_score = match behavior {
+                AntBehaviorState::Searching if effective_search_profile == SearchBehaviorProfile::LocalFieldV1 => {
+                    local_field_search
+                        .map(|score| score.visible_food_bonus + score.food_field_score)
+                        .unwrap_or(0)
+                }
+                AntBehaviorState::Searching if effective_search_profile == SearchBehaviorProfile::LocalFieldV2 => {
+                    destination_bias
+                }
                 AntBehaviorState::Searching if has_increasing_adjacent_food_signal => {
                     food_pheromone.saturating_sub(current_food_pheromone)
                 }
@@ -221,8 +319,19 @@ impl GameState {
                 (AntBehaviorState::ReturningFood, Some(Tile::Bedrock)) => 260_u32,
                 _ => 0_u32,
             };
-            let score = pheromone_score + random_score + tile_bonus + queen_bias + memory_bias;
-            let score = score.saturating_sub(terrain_penalty + recent_position_penalty);
+            let local_field_penalty = local_field_search
+                .map(|score| score.home_field_penalty + score.stone_penalty)
+                .unwrap_or(0);
+            let score = pheromone_score
+                + random_score
+                + tile_bonus
+                + queen_bias
+                + memory_bias
+                + search_profile_bias
+                + carry_harvest_bias;
+            let score = score.saturating_sub(
+                terrain_penalty + recent_position_penalty + local_field_penalty,
+            );
             candidates.push((score, next, tile));
             candidate_logs.push(json!({
                 "next": { "x": next.x, "y": next.y },
@@ -236,8 +345,21 @@ impl GameState {
                 "tile_bonus": tile_bonus,
                 "queen_bias": queen_bias,
                 "memory_bias": memory_bias,
+                "search_profile": search_behavior_profile_name(effective_search_profile),
+                "search_profile_bias": search_profile_bias,
+                "search_destination": search_destination.map(|pos| json!({ "x": pos.x, "y": pos.y })),
+                "destination_bias": destination_bias,
+                "carry_harvest_bias": carry_harvest_bias,
+                "local_field_search": local_field_search.map(|score| json!({
+                    "visible_food_bonus": score.visible_food_bonus,
+                    "visible_food_distance": score.visible_food_distance,
+                    "food_field_score": score.food_field_score,
+                    "home_field_penalty": score.home_field_penalty,
+                    "stone_penalty": score.stone_penalty,
+                })),
                 "recent_position_penalty": recent_position_penalty,
                 "terrain_penalty": terrain_penalty,
+                "local_field_penalty": local_field_penalty,
                 "score": score,
             }));
         }
@@ -269,6 +391,7 @@ impl GameState {
                             self.npcs[index].carrying_food_ticks.saturating_add(1);
                     }
                     remember_recent_position(&mut self.npcs[index].recent_positions, next);
+                    self.update_search_destination_progress(index, npc_pos, Some(next));
                     self.npcs_dirty = true;
                     outcome = "moved".to_string();
                     chosen_next = Some(next);
@@ -281,12 +404,24 @@ impl GameState {
                         worker_lifespan_bonus(self.npcs[index].age_ticks, self.worker_lifespan_ticks());
                     self.npcs[index].age_ticks =
                         self.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
+                    let previous_carried = self.npcs[index].food;
+                    let carried_after_pickup =
+                        previous_carried.saturating_add(1).min(food_carry_max);
                     self.npcs[index].carrying_food = true;
-                    self.npcs[index].behavior = AntBehaviorState::ReturningFood;
+                    self.npcs[index].food = carried_after_pickup;
+                    let keep_collecting = carried_after_pickup < food_carry_max
+                        && self.adjacent_food_visible(next);
+                    self.npcs[index].behavior = if keep_collecting {
+                        AntBehaviorState::Searching
+                    } else {
+                        AntBehaviorState::ReturningFood
+                    };
                     self.npcs[index].carrying_food_ticks = 0;
                     self.npcs[index].home_trail_steps = None;
                     self.npcs[index].recent_home_memory_ticks = 0;
                     self.npcs[index].recent_positions.clear();
+                    self.npcs[index].search_destination = None;
+                    self.npcs[index].search_destination_stuck_ticks = 0;
                     self.found_food_count = self.found_food_count.saturating_add(1);
                     self.npcs_dirty = true;
                     events.push(format!("NPC ant {} found food", npc_id));
@@ -298,6 +433,11 @@ impl GameState {
                         pos: next,
                         details: json!({
                             "behavior_before": behavior_name(behavior),
+                            "behavior_after": behavior_name(self.npcs[index].behavior),
+                            "carried_food_before": previous_carried,
+                            "carried_food_after": carried_after_pickup,
+                            "food_carry_max": food_carry_max,
+                            "keep_collecting": keep_collecting,
                             "lifespan_bonus": lifespan_bonus,
                             "age_ticks": self.npcs[index].age_ticks,
                         }),
@@ -317,12 +457,16 @@ impl GameState {
                         "NPC ant {} tunneled at {},{}",
                         npc_id, next.x, next.y
                     ));
+                    self.update_search_destination_progress(index, npc_pos, None);
                     outcome = "tunneled".to_string();
                     chosen_next = Some(next);
                     break;
                 }
                 Some(Tile::Food) | Some(Tile::Stone) | Some(Tile::Bedrock) | None => {}
             }
+        }
+        if chosen_next.is_none() {
+            self.update_search_destination_progress(index, npc_pos, None);
         }
 
         self.push_npc_debug_event(crate::NpcDebugEvent {
@@ -333,9 +477,18 @@ impl GameState {
             pos: npc_pos,
             details: json!({
                 "behavior": behavior_name(behavior),
+                "search_behavior_profile": search_behavior_profile_name(search_profile),
+                "effective_search_behavior_profile": search_behavior_profile_name(effective_search_profile),
                 "carrying_food": self.npcs[index].carrying_food,
+                "carried_food_count": self.npcs[index].food,
+                "food_carry_max": food_carry_max,
                 "carrying_food_ticks": self.npcs[index].carrying_food_ticks,
                 "home_trail_steps": self.npcs[index].home_trail_steps,
+                "search_destination": self.npcs[index]
+                    .search_destination
+                    .map(|pos| json!({ "x": pos.x, "y": pos.y })),
+                "search_destination_stuck_ticks": self.npcs[index].search_destination_stuck_ticks,
+                "has_delivered_food": self.npcs[index].has_delivered_food,
                 "memory": {
                     "home_dir": self.npcs[index].recent_home_dir.map(dir_name),
                     "home_ttl": self.npcs[index].recent_home_memory_ticks,
@@ -374,6 +527,11 @@ impl GameState {
             );
         }
         self.npcs[index].food = self.npcs[index].food.min(NpcKind::Queen.max_food());
+        if let Some(last_tick) = self.npcs[index].last_egg_laid_tick
+            && self.tick.saturating_sub(last_tick) < self.egg_laying_cooldown_ticks()
+        {
+            return;
+        }
         let egg_food_cost = self.queen_egg_food_cost();
         if self.npcs[index].food < egg_food_cost {
             return;
@@ -403,6 +561,7 @@ impl GameState {
         };
 
         self.npcs[index].food = self.npcs[index].food.saturating_sub(egg_food_cost);
+        self.npcs[index].last_egg_laid_tick = Some(self.tick);
         self.egg_laid_count = self.egg_laid_count.saturating_add(1);
         spawned_npcs.push(NpcAnt {
             id: self.next_npc_id,
@@ -422,7 +581,12 @@ impl GameState {
             recent_home_memory_ticks: 0,
             recent_food_memory_ticks: 0,
             recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            has_delivered_food: false,
             last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.npcs_dirty = true;
@@ -443,13 +607,25 @@ impl GameState {
     }
 
     fn tick_egg(&mut self, index: usize, events: &mut Vec<String>) {
-        let egg_hatch_ticks = self.egg_hatch_ticks();
-        let egg = &mut self.npcs[index];
-        egg.age_ticks = egg.age_ticks.saturating_add(1);
-        if egg.age_ticks < egg_hatch_ticks {
+        let minimum_delay_to_hatch = self.minimum_delay_to_hatch();
+        self.npcs[index].age_ticks = self.npcs[index].age_ticks.saturating_add(1);
+        if self.npcs[index].age_ticks < minimum_delay_to_hatch {
+            return;
+        }
+        let egg_hive_id = self.npcs[index].hive_id;
+        let queen_index = egg_hive_id.and_then(|hive_id| {
+            self.npcs
+                .iter()
+                .position(|npc| npc.kind == NpcKind::Queen && npc.hive_id == Some(hive_id))
+        });
+        if let Some(queen_index) = queen_index
+            && let Some(last_tick) = self.npcs[queen_index].last_egg_hatched_tick
+            && self.tick.saturating_sub(last_tick) < self.egg_hatch_cooldown_ticks()
+        {
             return;
         }
 
+        let egg = &mut self.npcs[index];
         egg.kind = NpcKind::Worker;
         egg.health = NpcKind::Worker.max_health();
         egg.food = 0;
@@ -463,10 +639,16 @@ impl GameState {
         egg.recent_home_memory_ticks = 0;
         egg.recent_food_memory_ticks = 0;
         egg.recent_positions.clear();
+        egg.search_destination = None;
+        egg.search_destination_stuck_ticks = 0;
+        egg.has_delivered_food = false;
         self.egg_hatched_count = self.egg_hatched_count.saturating_add(1);
         let hatched_id = egg.id;
         let hatched_hive_id = egg.hive_id;
         let hatched_pos = egg.pos;
+        if let Some(queen_index) = queen_index {
+            self.npcs[queen_index].last_egg_hatched_tick = Some(self.tick);
+        }
         self.npcs_dirty = true;
         events.push(format!(
             "Egg {} hatched into a worker ant",
@@ -657,10 +839,11 @@ impl GameState {
         let Some(queen_index) = queen_index else {
             return false;
         };
+        let delivered_amount = self.npcs[worker_index].food.max(1);
 
         self.npcs[queen_index].food = self.npcs[queen_index]
             .food
-            .saturating_add(1)
+            .saturating_add(delivered_amount)
             .min(NpcKind::Queen.max_food());
         self.npcs[worker_index].carrying_food = false;
         self.npcs[worker_index].carrying_food_ticks = 0;
@@ -669,7 +852,12 @@ impl GameState {
         self.npcs[worker_index].home_trail_steps = Some(0);
         self.npcs[worker_index].recent_food_memory_ticks = 0;
         self.npcs[worker_index].recent_positions.clear();
-        self.delivered_food_count = self.delivered_food_count.saturating_add(1);
+        self.npcs[worker_index].search_destination = None;
+        self.npcs[worker_index].search_destination_stuck_ticks = 0;
+        self.npcs[worker_index].has_delivered_food = true;
+        self.delivered_food_count = self
+            .delivered_food_count
+            .saturating_add(u64::from(delivered_amount));
         self.push_npc_debug_event(crate::NpcDebugEvent {
             tick: self.tick,
             npc_id: self.npcs[worker_index].id,
@@ -679,6 +867,7 @@ impl GameState {
             details: json!({
                 "queen_id": self.npcs[queen_index].id,
                 "queen_pos": { "x": self.npcs[queen_index].pos.x, "y": self.npcs[queen_index].pos.y },
+                "delivered_amount": delivered_amount,
                 "queen_food": self.npcs[queen_index].food,
             }),
         });
@@ -784,6 +973,234 @@ impl GameState {
         (left, right, up, down)
     }
 
+    fn local_field_search_bias(&self, origin: Position, hive_id: u16) -> LocalFieldSearchScore {
+        let mut best_food_distance = None;
+        let mut food_field_score = 0u32;
+        let mut home_field_penalty = 0u32;
+        let mut stone_penalty = 0u32;
+
+        for dy in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
+            for dx in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
+                let pos = origin.offset(dx, dy);
+                if !self.world.in_bounds(pos) {
+                    continue;
+                }
+                let distance = (dx.abs() + dy.abs()) as u32;
+                let distance = distance.max(1);
+
+                if self.world.tile(pos) == Some(Tile::Food) {
+                    best_food_distance = Some(
+                        best_food_distance
+                            .map(|current: u32| current.min(distance))
+                            .unwrap_or(distance),
+                    );
+                }
+
+                let food_value =
+                    u32::from(self.pheromones.value(pos, hive_id, PheromoneChannel::Food));
+                if food_value > 0 {
+                    food_field_score += (food_value * 8) / distance;
+                }
+
+                let home_value =
+                    u32::from(self.pheromones.value(pos, hive_id, PheromoneChannel::Home));
+                if home_value > 0 {
+                    home_field_penalty += (home_value * 3) / distance;
+                }
+
+                if matches!(self.world.tile(pos), Some(Tile::Stone | Tile::Bedrock)) {
+                    stone_penalty += 18 / distance;
+                }
+            }
+        }
+
+        let visible_food_bonus = best_food_distance
+            .map(|distance| 360_u32.saturating_sub(distance.saturating_sub(1) * 80))
+            .unwrap_or(0);
+
+        LocalFieldSearchScore {
+            visible_food_bonus,
+            visible_food_distance: best_food_distance,
+            food_field_score,
+            home_field_penalty,
+            stone_penalty,
+        }
+    }
+
+    fn refresh_local_field_destination(
+        &mut self,
+        index: usize,
+        hive_id: u16,
+        queen_pos: Option<Position>,
+    ) -> Option<Position> {
+        let origin = self.npcs[index].pos;
+        let current = self.npcs[index].search_destination;
+        let invalid = current.is_none_or(|destination| {
+            destination == origin
+                || !self.local_destination_is_valid(index, destination)
+                || manhattan_distance(origin, destination) > PHEROMONE_MEMORY_RADIUS
+        });
+        let stuck = self.npcs[index].search_destination_stuck_ticks >= 6;
+        if invalid || stuck {
+            self.npcs[index].search_destination =
+                self.choose_local_field_destination(index, hive_id, queen_pos);
+            self.npcs[index].search_destination_stuck_ticks = 0;
+            if let Some(destination) = self.npcs[index].search_destination {
+                self.push_npc_debug_event(crate::NpcDebugEvent {
+                    tick: self.tick,
+                    npc_id: self.npcs[index].id,
+                    hive_id: self.npcs[index].hive_id,
+                    event_type: "search_destination_selected".to_string(),
+                    pos: origin,
+                    details: json!({
+                        "destination": { "x": destination.x, "y": destination.y },
+                        "search_behavior_profile": "local_field_v2",
+                    }),
+                });
+            }
+        }
+        self.npcs[index].search_destination
+    }
+
+    fn choose_local_field_destination(
+        &self,
+        index: usize,
+        hive_id: u16,
+        queen_pos: Option<Position>,
+    ) -> Option<Position> {
+        let origin = self.npcs[index].pos;
+        let reachable = self.local_reachable_search_tiles(index, origin);
+        let mut best = None;
+        let mut best_score = 0u32;
+
+        for (candidate, distance) in reachable {
+            if candidate == origin {
+                continue;
+            }
+            let Some(tile) = self.world.tile(candidate) else {
+                continue;
+            };
+            let local = self.local_field_search_bias(candidate, hive_id);
+            let home_here = u32::from(self.pheromones.value(candidate, hive_id, PheromoneChannel::Home));
+            let food_here = u32::from(self.pheromones.value(candidate, hive_id, PheromoneChannel::Food));
+            let tile_bonus = match tile {
+                Tile::Food => 1_200_u32,
+                Tile::Empty => 60_u32,
+                Tile::Dirt | Tile::Resource => 20_u32,
+                Tile::Stone | Tile::Bedrock => 0_u32,
+            };
+            let outward_bonus = queen_pos
+                .map(|queen| {
+                    let current = manhattan_distance(origin, queen);
+                    let next = manhattan_distance(candidate, queen);
+                    if next > current {
+                        (u32::try_from(next - current).unwrap_or(0)) * 25
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
+            let openness_bonus =
+                u32::try_from(self.open_cardinal_neighbor_count(candidate, Some(index))).unwrap_or(0) * 18;
+            let distance_bonus = u32::try_from(distance).unwrap_or(0) * 20;
+            let exploration_bonus = 255_u32.saturating_sub(home_here).min(80);
+            let score = tile_bonus
+                + local.visible_food_bonus
+                + (local.food_field_score * 3)
+                + (food_here * 16)
+                + outward_bonus
+                + openness_bonus
+                + distance_bonus
+                + exploration_bonus;
+            let penalty = (local.home_field_penalty / 4)
+                + (local.stone_penalty / 3)
+                + recent_position_penalty(&self.npcs[index].recent_positions, candidate);
+            let score = score.saturating_sub(penalty);
+            if score > best_score {
+                best_score = score;
+                best = Some(candidate);
+            }
+        }
+
+        best
+    }
+
+    fn local_reachable_search_tiles(&self, index: usize, origin: Position) -> Vec<(Position, usize)> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut reachable = Vec::new();
+        visited.insert(origin);
+        queue.push_back((origin, 0usize));
+
+        while let Some((pos, distance)) = queue.pop_front() {
+            reachable.push((pos, distance));
+            for next in [
+                pos.offset(-1, 0),
+                pos.offset(1, 0),
+                pos.offset(0, -1),
+                pos.offset(0, 1),
+            ] {
+                if visited.contains(&next)
+                    || !self.world.in_bounds(next)
+                    || manhattan_distance(origin, next) > PHEROMONE_MEMORY_RADIUS
+                    || !self.search_tile_traversable(index, next)
+                {
+                    continue;
+                }
+                visited.insert(next);
+                queue.push_back((next, distance + 1));
+            }
+        }
+
+        reachable
+    }
+
+    fn local_destination_is_valid(&self, index: usize, destination: Position) -> bool {
+        self.world.in_bounds(destination) && self.search_tile_traversable(index, destination)
+    }
+
+    fn search_tile_traversable(&self, index: usize, pos: Position) -> bool {
+        if self.players.values().any(|player| player.pos == pos)
+            || self.npc_occupied(pos, Some(index))
+            || self.art_occupies_cell(pos)
+        {
+            return false;
+        }
+        matches!(
+            self.world.tile(pos),
+            Some(Tile::Empty | Tile::Food | Tile::Dirt | Tile::Resource)
+        )
+    }
+
+    fn update_search_destination_progress(
+        &mut self,
+        index: usize,
+        current_pos: Position,
+        chosen_next: Option<Position>,
+    ) {
+        let Some(destination) = self.npcs[index].search_destination else {
+            return;
+        };
+        let Some(chosen_next) = chosen_next else {
+            self.npcs[index].search_destination_stuck_ticks =
+                self.npcs[index].search_destination_stuck_ticks.saturating_add(1);
+            return;
+        };
+        if chosen_next == destination {
+            self.npcs[index].search_destination = None;
+            self.npcs[index].search_destination_stuck_ticks = 0;
+            return;
+        }
+        let current_distance = manhattan_distance(current_pos, destination);
+        let next_distance = manhattan_distance(chosen_next, destination);
+        if next_distance < current_distance {
+            self.npcs[index].search_destination_stuck_ticks = 0;
+        } else {
+            self.npcs[index].search_destination_stuck_ticks =
+                self.npcs[index].search_destination_stuck_ticks.saturating_add(1);
+        }
+    }
+
     fn local_neighborhood_snapshot(&self, origin: Position, hive_id: u16) -> Value {
         let mut cells = Vec::new();
         for dy in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
@@ -809,7 +1226,7 @@ impl GameState {
     }
 
     fn tick_soil_settling(&mut self) {
-        let frequency = crate::config::config_f64(
+        let frequency = config_f64(
             &self.config,
             "soil.settle_frequency",
             DEFAULT_SOIL_SETTLE_FREQUENCY,
@@ -878,6 +1295,105 @@ impl GameState {
             }
         }
     }
+
+    fn tick_plant_growth(&mut self) {
+        let frequency = config_f64(
+            &self.config,
+            "soil.plant_growth_frequency",
+            DEFAULT_PLANT_GROWTH_FREQUENCY,
+        )
+        .clamp(0.0, 1.0);
+        if frequency <= 0.0 {
+            return;
+        }
+        let vertical_growth_multiple = config_f64(
+            &self.config,
+            "soil.vertical_growth_multiple",
+            DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE,
+        )
+        .max(0.0);
+        let total_direction_weight = (vertical_growth_multiple * 2.0) + 2.0;
+        if total_direction_weight <= 0.0 {
+            return;
+        }
+
+        let occupied: HashSet<_> = self
+            .players
+            .values()
+            .map(|player| player.pos)
+            .chain(self.npcs.iter().map(|npc| npc.pos))
+            .collect();
+        let mut new_growth = HashSet::new();
+
+        for y in 0..self.world.height() {
+            for x in 0..self.world.width() {
+                let pos = Position { x, y };
+                if self.world.tile(pos) != Some(Tile::Food) {
+                    continue;
+                }
+
+                let roll = self.rng.random::<f64>() * total_direction_weight;
+                let target = if roll < vertical_growth_multiple {
+                    pos.offset(0, -1)
+                } else if roll < vertical_growth_multiple * 2.0 {
+                    pos.offset(0, 1)
+                } else if roll < (vertical_growth_multiple * 2.0) + 1.0 {
+                    pos.offset(-1, 0)
+                } else {
+                    pos.offset(1, 0)
+                };
+                if !self.world.in_bounds(target) {
+                    continue;
+                }
+                let Some(target_tile) = self.world.tile(target) else {
+                    continue;
+                };
+                if !matches!(target_tile, Tile::Empty | Tile::Dirt | Tile::Stone)
+                    || occupied.contains(&target)
+                    || new_growth.contains(&target)
+                {
+                    continue;
+                }
+
+                let neighboring_food = (-1..=1)
+                    .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                    .filter(|(dx, dy)| !(*dx == 0 && *dy == 0))
+                    .filter_map(|(dx, dy)| {
+                        let neighbor = target.offset(dx, dy);
+                        self.world.in_bounds(neighbor).then_some(neighbor)
+                    })
+                    .filter(|neighbor| self.world.tile(*neighbor) == Some(Tile::Food))
+                    .count();
+                if !(1..=3).contains(&neighboring_food) {
+                    continue;
+                }
+                let cardinal_neighboring_food = [
+                    target.offset(0, -1),
+                    target.offset(0, 1),
+                    target.offset(-1, 0),
+                    target.offset(1, 0),
+                ]
+                .into_iter()
+                .filter(|neighbor| self.world.in_bounds(*neighbor))
+                .filter(|neighbor| self.world.tile(*neighbor) == Some(Tile::Food))
+                .count();
+                let effective_frequency = if cardinal_neighboring_food >= 2 {
+                    (frequency * 4.0).clamp(0.0, 1.0)
+                } else {
+                    frequency
+                };
+                if self.rng.random::<f64>() > effective_frequency {
+                    continue;
+                }
+
+                new_growth.insert(target);
+            }
+        }
+
+        for pos in new_growth {
+            self.set_world_tile(pos, Tile::Food);
+        }
+    }
 }
 
 impl GameState {
@@ -897,8 +1413,26 @@ impl GameState {
         )
     }
 
-    fn egg_hatch_ticks(&self) -> u16 {
-        config_u16(&self.config, "colony.egg_hatch_ticks", EGG_HATCH_TICKS)
+    fn minimum_delay_to_hatch(&self) -> u16 {
+        self.config
+            .pointer("/colony/minimum_delay_to_hatch")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .or_else(|| {
+                self.config
+                    .pointer("/colony/egg_hatch_ticks")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u16::try_from(value).ok())
+            })
+            .unwrap_or(EGG_HATCH_TICKS)
+    }
+
+    fn egg_laying_cooldown_ticks(&self) -> u64 {
+        config_u64(&self.config, "queen.egg_laying_cooldown_ticks", 1)
+    }
+
+    fn egg_hatch_cooldown_ticks(&self) -> u64 {
+        config_u64(&self.config, "queen.egg_hatch_cooldown_ticks", 0)
     }
 
     fn queen_delivery_radius(&self) -> i32 {
@@ -919,6 +1453,65 @@ impl GameState {
             value => usize::try_from(value).ok(),
         }
     }
+
+    fn food_carry_max(&self) -> u16 {
+        config_u16(&self.config, "colony.food_carry_max", 1).max(1)
+    }
+
+    fn adjacent_food_visible(&self, pos: Position) -> bool {
+        !self.adjacent_food_positions(pos).is_empty()
+    }
+
+    fn adjacent_food_positions(&self, pos: Position) -> Vec<Position> {
+        (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+            .filter(|(dx, dy)| !(*dx == 0 && *dy == 0))
+            .map(|(dx, dy)| pos.offset(dx, dy))
+            .filter(|neighbor| self.world.in_bounds(*neighbor))
+            .filter(|neighbor| self.world.tile(*neighbor) == Some(Tile::Food))
+            .collect()
+    }
+
+    fn search_behavior_profile(&self) -> SearchBehaviorProfile {
+        match self
+            .config
+            .pointer("/colony/search_behavior_profile")
+            .and_then(Value::as_str)
+            .unwrap_or("baseline")
+        {
+            "outward_bias_with_local_field_v1" => SearchBehaviorProfile::OutwardBiasWithLocalFieldV1,
+            "local_field_v1" => SearchBehaviorProfile::LocalFieldV1,
+            "local_field_v2" => SearchBehaviorProfile::LocalFieldV2,
+            "outward_bias_v1" => SearchBehaviorProfile::OutwardBiasV1,
+            _ => SearchBehaviorProfile::Baseline,
+        }
+    }
+
+    fn effective_search_behavior_profile(
+        &self,
+        index: usize,
+        configured_profile: SearchBehaviorProfile,
+    ) -> SearchBehaviorProfile {
+        match configured_profile {
+            SearchBehaviorProfile::OutwardBiasWithLocalFieldV1 => {
+                if self.npcs[index].has_delivered_food {
+                    SearchBehaviorProfile::OutwardBiasV1
+                } else {
+                    SearchBehaviorProfile::LocalFieldV2
+                }
+            }
+            _ => configured_profile,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalFieldSearchScore {
+    visible_food_bonus: u32,
+    visible_food_distance: Option<u32>,
+    food_field_score: u32,
+    home_field_penalty: u32,
+    stone_penalty: u32,
 }
 
 fn food_deposit_for_carry_ticks(carry_ticks: u16) -> u8 {
@@ -939,6 +1532,34 @@ fn worker_lifespan_bonus(age_ticks: u16, default_max_life_span: u16) -> u16 {
     }
     let remaining = default_max_life_span.saturating_sub(age_ticks) as u32;
     ((remaining * 200) / u32::from(default_max_life_span)) as u16
+}
+
+fn search_behavior_profile_name(profile: SearchBehaviorProfile) -> &'static str {
+    match profile {
+        SearchBehaviorProfile::Baseline => "baseline",
+        SearchBehaviorProfile::OutwardBiasV1 => "outward_bias_v1",
+        SearchBehaviorProfile::LocalFieldV1 => "local_field_v1",
+        SearchBehaviorProfile::LocalFieldV2 => "local_field_v2",
+        SearchBehaviorProfile::OutwardBiasWithLocalFieldV1 => "outward_bias_with_local_field_v1",
+    }
+}
+
+fn local_field_destination_bias(current: Position, next: Position, destination: Position) -> u32 {
+    let current_distance = manhattan_distance(current, destination);
+    let next_distance = manhattan_distance(next, destination);
+    if next == destination {
+        280
+    } else if next_distance < current_distance {
+        u32::try_from(current_distance - next_distance).unwrap_or(0) * 140
+    } else if next_distance == current_distance {
+        12
+    } else {
+        0
+    }
+}
+
+fn manhattan_distance(a: Position, b: Position) -> i32 {
+    (a.x - b.x).abs() + (a.y - b.y).abs()
 }
 
 fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position) {

@@ -1,0 +1,29 @@
+{
+  "experiment_dir": "/Users/andrew/Development/antfarm/experiments/experiment-4",
+  "metrics": {
+    "delivered_food": 61.0,
+    "delivered_food_per_day": 1.605263157894737,
+    "final_day": 38.0,
+    "final_tick": 3746.0,
+    "found_food": 65.0,
+    "selected_move_count": 27616.0,
+    "simulation_length": 2062.0,
+    "steps_to_nth_food": {
+      "1": 88.18518518518519,
+      "2": 83.6875,
+      "3": 39.3,
+      "4": 79.71428571428571,
+      "5": 33.333333333333336,
+      "6": 61.0
+    },
+    "steps_to_nth_queen": {
+      "1": 60.72,
+      "2": 33.6,
+      "3": 23.22222222222222,
+      "4": 69.57142857142857,
+      "5": 23.0,
+      "6": 47.0
+    }
+  },
+  "run_dir": "/Users/andrew/Development/antfarm/experiments/experiment-4/outward-bias-v1/runs/run-1777128872476"
+}
