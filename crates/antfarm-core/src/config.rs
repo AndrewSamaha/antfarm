@@ -19,6 +19,9 @@ pub fn merge_with_default_config(config: Value) -> Value {
 
 fn default_config() -> Value {
     json!({
+        "network": {
+            "port": 14461
+        },
         "soil": {
             "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY,
             "plant_growth_frequency": DEFAULT_PLANT_GROWTH_FREQUENCY,

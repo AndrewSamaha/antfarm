@@ -48,6 +48,12 @@ If you omit the name, the client defaults to `worker-ant`:
 ./antfarm client
 ```
 
+To connect to a non-default localhost port:
+
+```bash
+./antfarm client --port 14461 scout
+```
+
 For multiplayer testing from the same folder without reusing the disk-backed token/history:
 
 ```bash
@@ -94,6 +100,8 @@ This defaults to `./server.yaml` in your current directory. You can still point 
 ./antfarm server --server-config ./experiments/experiment-1/server.yaml
 ./antfarm server --server-config ./experiments/experiment-1
 ```
+
+The server port now comes from `config.network.port` in `server.yaml` and defaults to `14461`.
 
 If that experiment config defines named conditions, select one explicitly:
 

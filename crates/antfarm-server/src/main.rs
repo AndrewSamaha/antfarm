@@ -9,7 +9,7 @@ mod startup_commands;
 mod sync;
 
 use anyhow::{Context, Result};
-use antfarm_core::{ReplayArtifact, set_config_path};
+use antfarm_core::{ReplayArtifact, config_u16, set_config_path};
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -36,8 +36,6 @@ use crate::{
     server_state::ServerState,
     startup_commands::run_startup_sc_commands,
 };
-
-const SERVER_ADDR: &str = "127.0.0.1:14461";
 
 fn print_help() {
     println!(
@@ -151,6 +149,8 @@ async fn main() -> Result<()> {
     let start_paused = start_paused || resolved_server_config.startup.paused;
     let reset_world = reset_world || resolved_server_config.startup.reset_world;
     let load_gamestate = load_gamestate.or(resolved_server_config.startup.load_gamestate.clone());
+    let server_port = config_u16(&resolved_server_config.config, "network.port", 14461);
+    let server_addr = format!("127.0.0.1:{server_port}");
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
     let mut experiment_context =
         maybe_create_run_context(
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
     emit_log(
         "starting_server",
         json!({
-            "addr": SERVER_ADDR,
+            "addr": server_addr,
             "snapshot_db": snapshot_path.display().to_string(),
             "server_config": loaded_server_config.path.as_ref().map(|path| path.display().to_string()),
             "condition": resolved_server_config.condition_name,
@@ -232,7 +232,7 @@ async fn main() -> Result<()> {
     emit_log(
         "server_start",
         json!({
-            "addr": SERVER_ADDR,
+            "addr": server_addr,
             "snapshot_db": snapshot_path.display().to_string(),
             "restored_snapshot": restored,
             "simulation_paused": initial_game.simulation_paused,
@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
         }),
     );
 
-    let listener = TcpListener::bind(SERVER_ADDR).await?;
+    let listener = TcpListener::bind(&server_addr).await?;
     let tick_millis = experiment_context
         .as_ref()
         .map(|ctx| ctx.tick_millis)
@@ -310,7 +310,7 @@ async fn main() -> Result<()> {
 
     spawn_background_tasks(&state);
 
-    emit_log("server_listening", json!({ "addr": SERVER_ADDR }));
+    emit_log("server_listening", json!({ "addr": server_addr }));
 
     loop {
         tokio::select! {

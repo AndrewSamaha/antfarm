@@ -7,7 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   cat <<'EOF'
 Usage:
-  ./antfarm client [--dev] [player-name]
+  ./antfarm client [--dev] [--port <port>] [player-name]
   ./antfarm server [server args...]
   ./antfarm experiment --server-config <path> [--num-runs <n>] [server args...]
   ./antfarm visualizations --server-config <path-or-dir>
@@ -20,6 +20,7 @@ Commands:
     Run one terminal client. The player name is optional and defaults to worker-ant.
     In --dev mode the client uses a random in-memory token, hides help at startup,
     and does not read or write client config/history files.
+    `--port` overrides the default localhost server port.
 
   server
     Run one antfarm server process. By default this reads ./server.yaml from your current directory.
@@ -43,6 +44,7 @@ Commands:
 Examples:
   ./antfarm client
   ./antfarm client scout
+  ./antfarm client --port 14461 scout
   ./antfarm client --dev
   ./antfarm client --dev scout
   ./antfarm server

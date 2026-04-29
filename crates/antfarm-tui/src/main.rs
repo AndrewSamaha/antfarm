@@ -31,6 +31,7 @@ use tokio::time::{self, timeout};
 struct ClientRuntimeOptions {
     player_name: String,
     dev_mode: bool,
+    port: u16,
 }
 
 #[tokio::main]
@@ -113,10 +114,24 @@ async fn run_replay_app(mut terminal: DefaultTerminal, replay_path: PathBuf) -> 
 fn parse_client_options(args: &[String]) -> Result<ClientRuntimeOptions> {
     let mut dev_mode = false;
     let mut player_name = None;
+    let mut port = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--dev" => dev_mode = true,
+            "--port" => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--port requires a value"))?;
+                let parsed = raw
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("--port must be a valid u16"))?;
+                if parsed == 0 {
+                    return Err(anyhow::anyhow!("--port must be greater than zero"));
+                }
+                index += 1;
+                port = Some(parsed);
+            }
             value if value.starts_with('-') => {
                 return Err(anyhow::anyhow!("unknown client option: {value}"));
             }
@@ -135,6 +150,7 @@ fn parse_client_options(args: &[String]) -> Result<ClientRuntimeOptions> {
     Ok(ClientRuntimeOptions {
         player_name: player_name.unwrap_or_else(|| "worker-ant".to_string()),
         dev_mode,
+        port: port.unwrap_or(14461),
     })
 }
 
@@ -157,6 +173,7 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
         load_or_create_client_config(&options.player_name)?
     };
     let client_token = client_config.token.clone();
+    let server_addr = format!("127.0.0.1:{}", options.port);
     let mut app = App::new(
         options.player_name.clone(),
         0,
@@ -183,7 +200,10 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
         tokio::select! {
             _ = redraw.tick() => app.tick_animation(),
             _ = reconnect.tick(), if connection.is_none() => {
-                match timeout(RECONNECT_ATTEMPT_TIMEOUT, connect_session(&app.player_name, &client_token)).await {
+                match timeout(
+                    RECONNECT_ATTEMPT_TIMEOUT,
+                    connect_session(&app.player_name, &client_token, &server_addr),
+                ).await {
                     Ok(Ok(new_connection)) => {
                         app.begin_syncing();
                         connection = Some(new_connection);
