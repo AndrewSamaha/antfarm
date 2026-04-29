@@ -19,6 +19,7 @@ pub(crate) struct App {
     pub(crate) persist_client_files: bool,
     pub(crate) camera_center: Position,
     pub(crate) show_help: bool,
+    pending_startup_help: bool,
     pub(crate) show_params: bool,
     pub(crate) params_scroll: u16,
     pub(crate) show_events: bool,
@@ -92,7 +93,8 @@ impl App {
             snapshot,
             mode: AppMode::Live,
             persist_client_files: true,
-            show_help,
+            show_help: false,
+            pending_startup_help: show_help,
             show_params: false,
             params_scroll: 0,
             show_events: false,
@@ -126,6 +128,7 @@ impl App {
             persist_client_files: false,
             camera_center,
             show_help: true,
+            pending_startup_help: false,
             show_params: false,
             params_scroll: 0,
             show_events: false,
@@ -273,6 +276,10 @@ impl App {
         self.snapshot.simulation_paused = complete.simulation_paused;
         self.sync_queen_idle_states();
         self.sync_state = SyncState::Ready;
+        if self.pending_startup_help {
+            self.show_help = true;
+            self.pending_startup_help = false;
+        }
         self.clear_status();
         self.sync_status_from_latest_event();
     }
