@@ -37,7 +37,7 @@ use crate::{
     startup_commands::run_startup_sc_commands,
 };
 
-const SERVER_ADDR: &str = "127.0.0.1:7000";
+const SERVER_ADDR: &str = "127.0.0.1:14461";
 
 fn print_help() {
     println!(

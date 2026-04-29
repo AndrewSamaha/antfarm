@@ -18,11 +18,11 @@ pub(crate) struct Connection {
 pub(crate) async fn connect_session(player_name: &str, client_token: &str) -> Result<Connection> {
     let stream = timeout(
         RECONNECT_ATTEMPT_TIMEOUT,
-        TcpStream::connect("127.0.0.1:7000"),
+        TcpStream::connect("127.0.0.1:14461"),
     )
     .await
     .context("timed out connecting to antfarm-server")?
-    .context("connect to antfarm-server on 127.0.0.1:7000")?;
+    .context("connect to antfarm-server on 127.0.0.1:14461")?;
 
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
