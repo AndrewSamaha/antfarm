@@ -103,7 +103,21 @@ This defaults to `./server.yaml` in your current directory. You can still point 
 ./antfarm server --server-config ./experiments/experiment-1
 ```
 
-The server port now comes from `config.network.port` in `server.yaml` and defaults to `14461`.
+The server bind settings now come from `server.yaml`:
+
+- `config.network.bind_host`
+  defaults to `0.0.0.0` so the server is reachable from other machines on the LAN
+- `config.network.port`
+  defaults to `14461`
+
+If you want localhost-only behavior again, set:
+
+```yaml
+config:
+  network:
+    bind_host: 127.0.0.1
+    port: 14461
+```
 
 If that experiment config defines named conditions, select one explicitly:
 

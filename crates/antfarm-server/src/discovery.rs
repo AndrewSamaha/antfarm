@@ -14,7 +14,7 @@ impl MdnsRegistration {
     }
 }
 
-pub(crate) fn start_mdns_registration(port: u16) -> Result<MdnsRegistration> {
+pub(crate) fn start_mdns_registration(bind_host: &str, port: u16) -> Result<MdnsRegistration> {
     let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
     let instance_name = format!("antfarm-{port}");
     let host_name = format!("{instance_name}.local.");
@@ -22,7 +22,7 @@ pub(crate) fn start_mdns_registration(port: u16) -> Result<MdnsRegistration> {
         SERVICE_TYPE,
         &instance_name,
         &host_name,
-        "127.0.0.1",
+        bind_host,
         port,
         &[] as &[(&str, &str)],
     )

@@ -1,5 +1,6 @@
 config:
   network:
+    bind_host: 0.0.0.0
     port: 14461
   soil:
     settle_frequency: 0.0001

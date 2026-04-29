@@ -10,7 +10,7 @@ mod startup_commands;
 mod sync;
 
 use anyhow::{Context, Result};
-use antfarm_core::{ReplayArtifact, config_u16, set_config_path};
+use antfarm_core::{ReplayArtifact, config_string, config_u16, set_config_path};
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -151,8 +151,13 @@ async fn main() -> Result<()> {
     let start_paused = start_paused || resolved_server_config.startup.paused;
     let reset_world = reset_world || resolved_server_config.startup.reset_world;
     let load_gamestate = load_gamestate.or(resolved_server_config.startup.load_gamestate.clone());
+    let server_bind_host = config_string(
+        &resolved_server_config.config,
+        "network.bind_host",
+        "0.0.0.0",
+    );
     let server_port = config_u16(&resolved_server_config.config, "network.port", 14461);
-    let server_addr = format!("127.0.0.1:{server_port}");
+    let server_addr = format!("{server_bind_host}:{server_port}");
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
     let mut experiment_context =
         maybe_create_run_context(
@@ -247,12 +252,13 @@ async fn main() -> Result<()> {
         }),
     );
 
-    let mdns_registration = match start_mdns_registration(server_port) {
+    let mdns_registration = match start_mdns_registration(&server_bind_host, server_port) {
         Ok(registration) => {
             emit_log(
                 "mdns_advertisement_started",
                 json!({
                     "service": registration.fullname(),
+                    "bind_host": server_bind_host,
                     "port": server_port,
                 }),
             );
@@ -262,6 +268,7 @@ async fn main() -> Result<()> {
             emit_log(
                 "mdns_advertisement_failed",
                 json!({
+                    "bind_host": server_bind_host,
                     "port": server_port,
                     "error": error.to_string(),
                 }),
