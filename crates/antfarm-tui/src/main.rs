@@ -2,14 +2,16 @@ mod app;
 mod art;
 mod client_files;
 mod commands;
+mod discovery;
 mod input;
 mod modals;
 mod network;
 mod render;
 
 use crate::{
-    app::{App, SyncState, handle_server_message},
+    app::{App, handle_server_message},
     client_files::{ephemeral_client_config, load_command_history, load_or_create_client_config},
+    discovery::{DiscoveryUpdate, localhost_server, spawn_mdns_discovery},
     input::handle_event,
     network::{
         Connection, RECONNECT_ATTEMPT_TIMEOUT, connect_session, offline_snapshot,
@@ -173,7 +175,6 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
         load_or_create_client_config(&options.player_name)?
     };
     let client_token = client_config.token.clone();
-    let server_addr = format!("127.0.0.1:{}", options.port);
     let mut app = App::new(
         options.player_name.clone(),
         0,
@@ -185,11 +186,13 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
     if app.persist_client_files {
         app.command_history = load_command_history(&options.player_name, app.max_history)?;
     }
-    app.sync_state = SyncState::Connecting;
+    app.begin_server_selection();
+    app.upsert_discovered_server(localhost_server(options.port));
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
     let mut reconnect = time::interval(Duration::from_millis(1000));
     let mut pheromone_refresh = time::interval(Duration::from_millis(500));
+    let mut discovery_rx = spawn_mdns_discovery();
     reconnect.tick().await;
     pheromone_refresh.tick().await;
     let mut connection: Option<Connection> = None;
@@ -199,7 +202,11 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
 
         tokio::select! {
             _ = redraw.tick() => app.tick_animation(),
-            _ = reconnect.tick(), if connection.is_none() => {
+            _ = reconnect.tick(), if connection.is_none() && app.selected_server_addr.is_some() && !app.is_selecting_server() => {
+                let server_addr = app
+                    .selected_server_addr
+                    .clone()
+                    .expect("guard ensures selected server addr");
                 match timeout(
                     RECONNECT_ATTEMPT_TIMEOUT,
                     connect_session(&app.player_name, &client_token, &server_addr),
@@ -230,6 +237,13 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
                         connection = None;
                         app.enter_reconnecting("attempting to reconnect".to_string());
                     }
+                }
+            }
+            Some(update) = discovery_rx.recv() => {
+                match update {
+                    DiscoveryUpdate::Upsert(server) => app.upsert_discovered_server(server),
+                    DiscoveryUpdate::Remove { id } => app.remove_discovered_server(&id),
+                    DiscoveryUpdate::Error(message) => app.set_error(message),
                 }
             }
             maybe_event = tokio_stream_event(&mut events) => {

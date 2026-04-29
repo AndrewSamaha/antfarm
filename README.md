@@ -63,6 +63,8 @@ For multiplayer testing from the same folder without reusing the disk-backed tok
 
 `--dev` uses a random in-memory client token, defaults to not showing help at startup, and does not read or write client config/history files.
 
+On startup, the live client now shows a server-selection list. It always includes localhost on the configured port and also lists antfarm servers discovered on the LAN via mDNS. Use `j/k` or the arrow keys to choose a server and press `Enter` to connect.
+
 To run the headless determinism test:
 
 ```bash

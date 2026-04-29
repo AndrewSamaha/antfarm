@@ -1,5 +1,6 @@
 mod client_session;
 mod debug_npc;
+mod discovery;
 mod experiment;
 mod logging;
 mod persistence;
@@ -22,6 +23,7 @@ use tokio::{net::TcpListener, sync::{Mutex, Notify}};
 
 use crate::{
     client_session::{SNAPSHOT_DB_PATH, handle_client},
+    discovery::start_mdns_registration,
     debug_npc::start_npc_debug_session_at_path,
     experiment::{
         condition_plan, datetime_seed, debug_log_path, load_server_config, maybe_create_run_context,
@@ -245,6 +247,29 @@ async fn main() -> Result<()> {
         }),
     );
 
+    let mdns_registration = match start_mdns_registration(server_port) {
+        Ok(registration) => {
+            emit_log(
+                "mdns_advertisement_started",
+                json!({
+                    "service": registration.fullname(),
+                    "port": server_port,
+                }),
+            );
+            Some(registration)
+        }
+        Err(error) => {
+            emit_log(
+                "mdns_advertisement_failed",
+                json!({
+                    "port": server_port,
+                    "error": error.to_string(),
+                }),
+            );
+            None
+        }
+    };
+
     let listener = TcpListener::bind(&server_addr).await?;
     let tick_millis = experiment_context
         .as_ref()
@@ -329,6 +354,8 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    drop(mdns_registration);
 
     Ok(())
 }

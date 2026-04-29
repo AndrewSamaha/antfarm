@@ -1,9 +1,11 @@
 use crate::app::{App, PendingCommand, SyncState};
+use crate::discovery::DiscoverySource;
 use antfarm_core::PlaceMaterial;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    text::Line,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
@@ -92,6 +94,39 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
 
 pub(crate) fn draw_sync_modal(frame: &mut Frame, area: Rect, app: &App) {
     let (title, lines) = match app.sync_state {
+        SyncState::SelectingServer => {
+            let mut lines = vec![
+                Line::from("Select a server and press Enter."),
+                Line::from(""),
+            ];
+            if app.discovered_servers.is_empty() {
+                lines.push(Line::from("Searching for LAN servers..."));
+            } else {
+                for (index, server) in app.discovered_servers.iter().enumerate() {
+                    let marker = if index == app.selected_server_index { ">" } else { " " };
+                    let source = match server.source {
+                        DiscoverySource::Localhost => "localhost",
+                        DiscoverySource::Mdns => "mDNS",
+                    };
+                    let style = if index == app.selected_server_index {
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("{marker} {} [{}] {}", server.label, source, server.addr),
+                        style,
+                    )]));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from("j/k or arrows: move selection"));
+            lines.push(Line::from("Enter: connect"));
+            lines.push(Line::from("q: quit"));
+            ("Select Server", lines)
+        }
         SyncState::Connecting => (
             "Connecting",
             vec![

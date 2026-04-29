@@ -9,6 +9,7 @@ anyhow = "1"
 antfarm-core = { path = "../antfarm-core" }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
+mdns-sd = "0.13"
 rand = "0.9"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
