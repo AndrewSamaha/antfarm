@@ -8,12 +8,13 @@ mod server_state;
 mod startup_commands;
 mod sync;
 
-use anyhow::Result;
-use antfarm_core::set_config_path;
+use anyhow::{Context, Result};
+use antfarm_core::{ReplayArtifact, set_config_path};
 use serde_json::json;
 use std::{
     collections::HashMap,
     env,
+    fs,
     path::PathBuf,
     sync::Arc,
 };
@@ -52,6 +53,7 @@ Options:
       --condition VALUE        Select one named experiment condition from server.yaml
       --list-condition-plan    Print condition names and configured run counts, then exit
       --print-visualizations-json  Print experiment visualization specs as JSON and exit
+      --replay-artifact VALUE  Replay one deterministic replay artifact and exit
       --reset-world            Clear live world snapshots and player profiles before startup
       --paused                 Start the simulation in the paused state
       --list-gamestates        List saved gamestate bookmarks and exit
@@ -81,6 +83,7 @@ async fn main() -> Result<()> {
     let mut condition = None;
     let mut load_gamestate = None;
     let mut delete_gamestate = None;
+    let mut replay_artifact_path = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -112,9 +115,19 @@ async fn main() -> Result<()> {
                 delete_gamestate = Some(selector.clone());
                 index += 1;
             }
+            "--replay-artifact" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--replay-artifact requires a path"))?;
+                replay_artifact_path = Some(path.clone());
+                index += 1;
+            }
             _ => {}
         }
         index += 1;
+    }
+    if let Some(path) = replay_artifact_path {
+        return run_replay_artifact(PathBuf::from(path));
     }
     let loaded_server_config = load_server_config(server_config_path.as_deref())?;
     if list_condition_plan {
@@ -284,6 +297,16 @@ async fn main() -> Result<()> {
         &resolved_server_config.startup.sc_commands,
     )
     .await?;
+    {
+        let game = state.game.lock().await;
+        let mut experiment = state.experiment.lock().await;
+        if let Some(context) = experiment.as_mut() {
+            if context.replay_save {
+                context.initial_snapshot = Some(game.snapshot());
+                persist_run_manifest(context)?;
+            }
+        }
+    }
 
     spawn_background_tasks(&state);
 
@@ -308,4 +331,31 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_replay_artifact(path: PathBuf) -> Result<()> {
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("read replay artifact {}", path.display()))?;
+    let artifact = serde_json::from_str::<ReplayArtifact>(&raw)
+        .with_context(|| format!("parse replay artifact {}", path.display()))?;
+    let verification = artifact
+        .replay()
+        .context("replay deterministic artifact")?;
+    emit_log(
+        "replay_finished",
+        json!({
+            "artifact_path": path.display().to_string(),
+            "matches_expected": verification.matches_expected,
+            "initial_snapshot_hash": verification.initial_snapshot_hash,
+            "expected_final_snapshot_hash": verification.expected_final_snapshot_hash,
+            "actual_final_snapshot_hash": verification.actual_final_snapshot_hash,
+            "final_tick": verification.final_tick,
+        }),
+    );
+    println!("{}", serde_json::to_string_pretty(&verification)?);
+    if verification.matches_expected {
+        Ok(())
+    } else {
+        anyhow::bail!("replay final snapshot hash did not match expected hash");
+    }
 }

@@ -296,8 +296,99 @@ async fn run_startup_sc_command(
         return Ok(());
     }
 
-    if trimmed.starts_with("/sc dig ") || trimmed.starts_with("/sc put ") {
-        return Err(anyhow!("startup commands do not support player-relative dig/put without a live player context"));
+    if let Some(raw) = trimmed.strip_prefix("/sc dig ") {
+        let args = raw.split_whitespace().collect::<Vec<_>>();
+        let (center, width_raw, height_raw) = match args.as_slice() {
+            [width_raw, height_raw] => (None, *width_raw, *height_raw),
+            [x_raw, y_raw, width_raw, height_raw] => {
+                let x = x_raw
+                    .parse::<i32>()
+                    .map_err(|_| anyhow!("dig x must be an integer"))?;
+                let y = y_raw
+                    .parse::<i32>()
+                    .map_err(|_| anyhow!("dig y must be an integer"))?;
+                (Some(antfarm_core::Position { x, y }), *width_raw, *height_raw)
+            }
+            _ => {
+                return Err(anyhow!(
+                    "expected: /sc dig <width> <height> or /sc dig <x> <y> <width> <height>"
+                ))
+            }
+        };
+        let width = width_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow!("dig width must be an unsigned integer"))?;
+        let height = height_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow!("dig height must be an unsigned integer"))?;
+        let snapshot = {
+            let mut game = state.game.lock().await;
+            match center {
+                Some(center) => game
+                    .dig_area_at(center, width, height, None)
+                    .map_err(anyhow::Error::msg)?,
+                None => {
+                    return Err(anyhow!(
+                        "startup dig without explicit x/y is not supported without a live player context"
+                    ))
+                }
+            }
+            let snapshot = game.snapshot();
+            let _ = game.take_patch();
+            snapshot
+        };
+        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        return Ok(());
+    }
+
+    if let Some(raw) = trimmed.strip_prefix("/sc put ") {
+        let args = raw.split_whitespace().collect::<Vec<_>>();
+        let (resource, center, width_raw, height_raw) = match args.as_slice() {
+            [resource, width_raw, height_raw] => (resource.to_string(), None, *width_raw, *height_raw),
+            [resource, x_raw, y_raw, width_raw, height_raw] => {
+                let x = x_raw
+                    .parse::<i32>()
+                    .map_err(|_| anyhow!("put x must be an integer"))?;
+                let y = y_raw
+                    .parse::<i32>()
+                    .map_err(|_| anyhow!("put y must be an integer"))?;
+                (
+                    resource.to_string(),
+                    Some(antfarm_core::Position { x, y }),
+                    *width_raw,
+                    *height_raw,
+                )
+            }
+            _ => {
+                return Err(anyhow!(
+                    "expected: /sc put <resource> <width> <height> or /sc put <resource> <x> <y> <width> <height>"
+                ))
+            }
+        };
+        let width = width_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow!("put width must be an unsigned integer"))?;
+        let height = height_raw
+            .parse::<u16>()
+            .map_err(|_| anyhow!("put height must be an unsigned integer"))?;
+        let snapshot = {
+            let mut game = state.game.lock().await;
+            match center {
+                Some(center) => game
+                    .put_area_at(center, &resource, width, height, None)
+                    .map_err(anyhow::Error::msg)?,
+                None => {
+                    return Err(anyhow!(
+                        "startup put without explicit x/y is not supported without a live player context"
+                    ))
+                }
+            }
+            let snapshot = game.snapshot();
+            let _ = game.take_patch();
+            snapshot
+        };
+        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        return Ok(());
     }
 
     Err(anyhow!("unsupported startup command: {trimmed}"))

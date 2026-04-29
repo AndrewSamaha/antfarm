@@ -248,7 +248,11 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     broadcast_patch(&state, &patch, None).await?;
                 }
             }
-            ClientMessage::DigArea { width, height } => {
+            ClientMessage::DigArea {
+                center,
+                width,
+                height,
+            } => {
                 let Some(id) = player_id else {
                     tx.send(ServerMessage::Error {
                         message: "Join before using dig".to_string(),
@@ -258,8 +262,12 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
 
                 let (maybe_patch, snapshot) = {
                     let mut game = state.game.lock().await;
-                    game.dig_area(id, width, height)
-                        .map_err(anyhow::Error::msg)?;
+                    match center {
+                        Some(center) => game
+                            .dig_area_at(center, width, height, None)
+                            .map_err(anyhow::Error::msg)?,
+                        None => game.dig_area(id, width, height).map_err(anyhow::Error::msg)?,
+                    }
                     let patch = game.take_patch();
                     let snapshot = game.snapshot();
                     (patch, snapshot)
@@ -269,6 +277,7 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     "sc_dig",
                     json!({
                         "player_id": id,
+                        "center": center.map(|pos| json!({ "x": pos.x, "y": pos.y })),
                         "width": width,
                         "height": height,
                     }),
@@ -280,6 +289,7 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
             }
             ClientMessage::PutArea {
                 resource,
+                center,
                 width,
                 height,
             } => {
@@ -293,8 +303,14 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                 let logged_resource = resource.clone();
                 let (maybe_patch, snapshot) = {
                     let mut game = state.game.lock().await;
-                    game.put_area(id, &resource, width, height)
-                        .map_err(anyhow::Error::msg)?;
+                    match center {
+                        Some(center) => game
+                            .put_area_at(center, &resource, width, height, None)
+                            .map_err(anyhow::Error::msg)?,
+                        None => game
+                            .put_area(id, &resource, width, height)
+                            .map_err(anyhow::Error::msg)?,
+                    }
                     let patch = game.take_patch();
                     let snapshot = game.snapshot();
                     (patch, snapshot)
@@ -305,6 +321,7 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     json!({
                         "player_id": id,
                         "resource": logged_resource,
+                        "center": center.map(|pos| json!({ "x": pos.x, "y": pos.y })),
                         "width": width,
                         "height": height,
                     }),

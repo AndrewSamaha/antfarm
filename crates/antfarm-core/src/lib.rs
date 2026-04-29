@@ -8,6 +8,7 @@ mod npc;
 mod npc_debug;
 mod pheromones;
 mod protocol;
+mod replay;
 mod types;
 mod world;
 
@@ -36,5 +37,6 @@ pub use protocol::{
     Action, ClientMessage, DigProgress, FullSyncChunk, FullSyncComplete, FullSyncStart, PatchFrame,
     PlaceMaterial, PlacedArt, ServerMessage, Snapshot, TileUpdate,
 };
+pub use replay::{ReplayArtifact, ReplayVerification};
 pub use types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, Tile, Viewport};
 pub use world::World;

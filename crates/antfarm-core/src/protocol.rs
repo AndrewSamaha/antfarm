@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{
     pheromones::{PheromoneChannel, PheromoneMap},
@@ -19,6 +20,50 @@ pub struct Snapshot {
     pub config: Value,
     #[serde(default)]
     pub simulation_paused: bool,
+}
+
+impl Snapshot {
+    pub fn deterministic_hash_hex(&self) -> Result<String, serde_json::Error> {
+        let value = serde_json::to_value(self)?;
+        let mut canonical_json = String::new();
+        write_canonical_json(&value, &mut canonical_json)?;
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_json.as_bytes());
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+}
+
+fn write_canonical_json(value: &Value, out: &mut String) -> Result<(), serde_json::Error> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            out.push_str(&serde_json::to_string(value)?);
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(item, out)?;
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            out.push('{');
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (index, (key, item)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key)?);
+                out.push(':');
+                write_canonical_json(item, out)?;
+            }
+            out.push('}');
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,11 +98,13 @@ pub enum ClientMessage {
         selector: String,
     },
     DigArea {
+        center: Option<Position>,
         width: u16,
         height: u16,
     },
     PutArea {
         resource: String,
+        center: Option<Position>,
         width: u16,
         height: u16,
     },

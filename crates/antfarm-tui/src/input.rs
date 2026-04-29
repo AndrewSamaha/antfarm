@@ -68,6 +68,10 @@ pub(crate) async fn handle_event(
     };
 
     if let Some(dir) = direction {
+        if writer.is_none() && app.is_replay() && app.player().is_none() {
+            app.pan_camera(dir);
+            return Ok(false);
+        }
         let action = match app.pending_command {
             PendingCommand::None => default_action(app, dir),
             PendingCommand::PlaceMaterial => {
@@ -112,7 +116,9 @@ pub(crate) async fn handle_event(
         KeyCode::Char('e') => app.show_events = !app.show_events,
         KeyCode::Tab => app.show_npc_bars = !app.show_npc_bars,
         KeyCode::Char('p') => {
-            if let Some(writer) = writer {
+            if app.is_replay() && writer.is_none() {
+                app.toggle_local_pause();
+            } else if let Some(writer) = writer {
                 send_message(
                     writer,
                     ClientMessage::SetSimulationPaused {

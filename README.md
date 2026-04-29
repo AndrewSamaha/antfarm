@@ -48,6 +48,30 @@ If you omit the name, the client defaults to `worker-ant`:
 ./antfarm client
 ```
 
+To run the headless determinism test:
+
+```bash
+./antfarm test
+```
+
+That test now also writes a deterministic replay artifact to:
+
+```text
+.artifacts/tests/replays/headless-determinism/latest/replay.json
+```
+
+To replay and verify one deterministic replay artifact:
+
+```bash
+./antfarm replay ./.artifacts/tests/replays/headless-determinism/latest/replay.json
+```
+
+To open a replay in the terminal viewer:
+
+```bash
+./antfarm replay-tui ./.artifacts/tests/replays/headless-determinism/latest/replay.json
+```
+
 To run a single experiment-configured server:
 
 ```bash

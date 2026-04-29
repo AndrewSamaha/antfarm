@@ -11,6 +11,9 @@ Usage:
   ./antfarm server [server args...]
   ./antfarm experiment --server-config <path> [--num-runs <n>] [server args...]
   ./antfarm visualizations --server-config <path-or-dir>
+  ./antfarm replay <replay-artifact-path>
+  ./antfarm replay-tui <replay-artifact-path>
+  ./antfarm test [cargo test args...]
 
 Commands:
   client
@@ -26,6 +29,15 @@ Commands:
   visualizations
     Regenerate an experiment's visualizations and refresh results.html from the current server.yaml.
 
+  replay
+    Replay one deterministic replay artifact and verify its final snapshot hash.
+
+  replay-tui
+    Open one deterministic replay artifact in the terminal replay viewer.
+
+  test
+    Run the headless determinism test in antfarm-core.
+
 Examples:
   ./antfarm client
   ./antfarm client scout
@@ -36,6 +48,9 @@ Examples:
   ./antfarm experiment --server-config ./experiments/experiment-1/server.yaml --num-runs 10
   ./antfarm experiment --server-config ./experiments/experiment-1 --num-runs 10
   ./antfarm visualizations --server-config ./experiments/experiment-4
+  ./antfarm replay ./.artifacts/tests/replays/headless-determinism/latest/replay.json
+  ./antfarm replay-tui ./.artifacts/tests/replays/headless-determinism/latest/replay.json
+  ./antfarm test
 EOF
 }
 
@@ -59,6 +74,15 @@ case "$command" in
     ;;
   visualizations)
     exec "$ROOT_DIR/scripts/visualizations.sh" "$@"
+    ;;
+  replay)
+    exec "$ROOT_DIR/scripts/replay.sh" "$@"
+    ;;
+  replay-tui)
+    exec "$ROOT_DIR/scripts/replay_tui.sh" "$@"
+    ;;
+  test)
+    exec "$ROOT_DIR/scripts/test.sh" "$@"
     ;;
   -h|--help|help)
     usage
