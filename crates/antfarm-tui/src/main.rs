@@ -11,7 +11,7 @@ mod render;
 use crate::{
     app::{App, handle_server_message},
     client_files::{ephemeral_client_config, load_command_history, load_or_create_client_config},
-    discovery::{DiscoveryUpdate, localhost_server, spawn_mdns_discovery},
+    discovery::{DiscoveryUpdate, probe_localhost_server, spawn_mdns_discovery},
     input::handle_event,
     network::{
         Connection, RECONNECT_ATTEMPT_TIMEOUT, connect_session, offline_snapshot,
@@ -187,12 +187,19 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
         app.command_history = load_command_history(&options.player_name, app.max_history)?;
     }
     app.begin_server_selection();
-    app.upsert_discovered_server(localhost_server(options.port));
+    if let Some(localhost) = probe_localhost_server(options.port).await {
+        app.upsert_discovered_server(localhost);
+    }
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
     let mut reconnect = time::interval(Duration::from_millis(1000));
     let mut pheromone_refresh = time::interval(Duration::from_millis(500));
-    let mut discovery_rx = spawn_mdns_discovery();
+    let localhost_port = app
+        .discovered_servers
+        .iter()
+        .find(|server| matches!(server.source, crate::discovery::DiscoverySource::Localhost))
+        .map(|server| server.port);
+    let mut discovery_rx = spawn_mdns_discovery(localhost_port);
     reconnect.tick().await;
     pheromone_refresh.tick().await;
     let mut connection: Option<Connection> = None;
