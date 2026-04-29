@@ -15,14 +15,18 @@ pub(crate) struct Connection {
     network_rx: mpsc::UnboundedReceiver<ServerMessage>,
 }
 
-pub(crate) async fn connect_session(player_name: &str, client_token: &str) -> Result<Connection> {
+pub(crate) async fn connect_session(
+    player_name: &str,
+    client_token: &str,
+    server_addr: &str,
+) -> Result<Connection> {
     let stream = timeout(
         RECONNECT_ATTEMPT_TIMEOUT,
-        TcpStream::connect("127.0.0.1:7000"),
+        TcpStream::connect(server_addr),
     )
     .await
     .context("timed out connecting to antfarm-server")?
-    .context("connect to antfarm-server on 127.0.0.1:7000")?;
+    .with_context(|| format!("connect to antfarm-server on {server_addr}"))?;
 
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();

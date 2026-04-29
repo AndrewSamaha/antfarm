@@ -132,7 +132,7 @@ async fn submit_command(
     writer: Option<&mut tokio::net::tcp::OwnedWriteHalf>,
 ) -> Result<()> {
     let trimmed = command.trim();
-    if !trimmed.is_empty() && push_command_history(app, trimmed) {
+    if app.persist_client_files && !trimmed.is_empty() && push_command_history(app, trimmed) {
         crate::client_files::save_command_history(&app.player_name, &app.command_history, app.max_history)?;
     }
 

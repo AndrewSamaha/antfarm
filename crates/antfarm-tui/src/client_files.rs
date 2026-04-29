@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ClientConfig {
     pub(crate) token: String,
     #[serde(default = "default_show_help_at_startup")]
@@ -44,6 +44,14 @@ pub(crate) fn load_or_create_client_config(player_name: &str) -> Result<ClientCo
     };
     save_client_config(player_name, &config)?;
     Ok(config)
+}
+
+pub(crate) fn ephemeral_client_config() -> ClientConfig {
+    ClientConfig {
+        token: generate_client_token(),
+        show_help_at_startup: false,
+        max_history: default_max_history(),
+    }
 }
 
 pub(crate) fn save_client_config(player_name: &str, config: &ClientConfig) -> Result<()> {

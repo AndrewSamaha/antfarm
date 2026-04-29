@@ -4,6 +4,7 @@ use antfarm_core::{
     World, find_ascii_art_asset,
     default_server_config,
 };
+use crate::discovery::DiscoveredServer;
 use std::{
     collections::HashMap,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -15,8 +16,10 @@ pub(crate) struct App {
     pub(crate) player_id: u8,
     pub(crate) snapshot: Snapshot,
     pub(crate) mode: AppMode,
+    pub(crate) persist_client_files: bool,
     pub(crate) camera_center: Position,
     pub(crate) show_help: bool,
+    pending_startup_help: bool,
     pub(crate) show_params: bool,
     pub(crate) params_scroll: u16,
     pub(crate) show_events: bool,
@@ -28,6 +31,9 @@ pub(crate) struct App {
     pub(crate) command_feedback: Option<String>,
     pub(crate) command_history: Vec<String>,
     pub(crate) command_history_index: Option<usize>,
+    pub(crate) discovered_servers: Vec<DiscoveredServer>,
+    pub(crate) selected_server_index: usize,
+    pub(crate) selected_server_addr: Option<String>,
     pub(crate) last_error: Option<String>,
     pub(crate) last_info: Option<String>,
     pub(crate) max_history: usize,
@@ -44,6 +50,7 @@ pub(crate) enum AppMode {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SyncState {
+    SelectingServer,
     Connecting,
     Syncing { received_rows: i32, total_rows: i32 },
     Ready,
@@ -85,7 +92,9 @@ impl App {
             camera_center: default_camera_center(&snapshot.world),
             snapshot,
             mode: AppMode::Live,
-            show_help,
+            persist_client_files: true,
+            show_help: false,
+            pending_startup_help: show_help,
             show_params: false,
             params_scroll: 0,
             show_events: false,
@@ -97,6 +106,9 @@ impl App {
             command_feedback: None,
             command_history: Vec::new(),
             command_history_index: None,
+            discovered_servers: Vec::new(),
+            selected_server_index: 0,
+            selected_server_addr: None,
             last_error: None,
             last_info: None,
             max_history,
@@ -113,8 +125,10 @@ impl App {
             player_id: 0,
             snapshot,
             mode: AppMode::Replay,
+            persist_client_files: false,
             camera_center,
             show_help: true,
+            pending_startup_help: false,
             show_params: false,
             params_scroll: 0,
             show_events: false,
@@ -126,6 +140,9 @@ impl App {
             command_feedback: None,
             command_history: Vec::new(),
             command_history_index: None,
+            discovered_servers: Vec::new(),
+            selected_server_index: 0,
+            selected_server_addr: None,
             last_error: None,
             last_info: None,
             max_history,
@@ -144,6 +161,10 @@ impl App {
 
     pub(crate) fn is_replay(&self) -> bool {
         self.mode == AppMode::Replay
+    }
+
+    pub(crate) fn is_selecting_server(&self) -> bool {
+        matches!(self.sync_state, SyncState::SelectingServer)
     }
 
     pub(crate) fn focus_position(&self) -> Position {
@@ -208,6 +229,11 @@ impl App {
         self.clear_status();
     }
 
+    pub(crate) fn begin_server_selection(&mut self) {
+        self.sync_state = SyncState::SelectingServer;
+        self.clear_status();
+    }
+
     pub(crate) fn start_full_sync(&mut self, start: &FullSyncStart) {
         self.player_id = start.player_id;
         self.snapshot.tick = start.tick;
@@ -250,6 +276,10 @@ impl App {
         self.snapshot.simulation_paused = complete.simulation_paused;
         self.sync_queen_idle_states();
         self.sync_state = SyncState::Ready;
+        if self.pending_startup_help {
+            self.show_help = true;
+            self.pending_startup_help = false;
+        }
         self.clear_status();
         self.sync_status_from_latest_event();
     }
@@ -261,6 +291,62 @@ impl App {
 
     pub(crate) fn is_ready(&self) -> bool {
         matches!(self.sync_state, SyncState::Ready)
+    }
+
+    pub(crate) fn selected_server(&self) -> Option<&DiscoveredServer> {
+        self.discovered_servers.get(self.selected_server_index)
+    }
+
+    pub(crate) fn move_server_selection(&mut self, delta: i32) {
+        if self.discovered_servers.is_empty() {
+            self.selected_server_index = 0;
+            return;
+        }
+        let max_index = self.discovered_servers.len().saturating_sub(1) as i32;
+        let next = (self.selected_server_index as i32 + delta).clamp(0, max_index) as usize;
+        self.selected_server_index = next;
+    }
+
+    pub(crate) fn upsert_discovered_server(&mut self, server: DiscoveredServer) {
+        if let Some(existing_index) = self
+            .discovered_servers
+            .iter()
+            .position(|existing| existing.id == server.id)
+        {
+            self.discovered_servers[existing_index] = server;
+            return;
+        }
+        self.discovered_servers.push(server);
+        self.discovered_servers.sort_by(|left, right| {
+            use crate::discovery::DiscoverySource;
+            match (&left.source, &right.source) {
+                (DiscoverySource::Localhost, DiscoverySource::Mdns) => std::cmp::Ordering::Less,
+                (DiscoverySource::Mdns, DiscoverySource::Localhost) => std::cmp::Ordering::Greater,
+                _ => left.label.cmp(&right.label),
+            }
+        });
+        if self.selected_server_index >= self.discovered_servers.len() {
+            self.selected_server_index = self.discovered_servers.len().saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn remove_discovered_server(&mut self, id: &str) {
+        self.discovered_servers.retain(|server| server.id != id);
+        if self.discovered_servers.is_empty() {
+            self.selected_server_index = 0;
+        } else if self.selected_server_index >= self.discovered_servers.len() {
+            self.selected_server_index = self.discovered_servers.len().saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn choose_selected_server(&mut self) -> bool {
+        let Some(server) = self.selected_server().cloned() else {
+            return false;
+        };
+        self.selected_server_addr = Some(server.addr.clone());
+        self.sync_state = SyncState::Connecting;
+        self.set_info(format!("Connecting to {}", server.label));
+        true
     }
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {

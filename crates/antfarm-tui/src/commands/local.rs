@@ -18,6 +18,47 @@ pub(super) async fn submit_local_command(trimmed: &str, app: &mut App) -> Result
         return Ok(());
     }
 
+    if !app.persist_client_files {
+        match path {
+            "show_help_at_startup" => {
+                let show_help_at_startup = match raw_value {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        app.set_error("expected: /cc set show_help_at_startup true|false");
+                        return Ok(());
+                    }
+                };
+                app.set_info(format!(
+                    "dev mode client config updated in memory: show_help_at_startup={show_help_at_startup}"
+                ));
+            }
+            "max_history" => {
+                let max_history = raw_value
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("max_history must be a positive integer"))?;
+                if max_history == 0 {
+                    app.set_error("max_history must be at least 1");
+                    return Ok(());
+                }
+                app.max_history = max_history;
+                if app.command_history.len() > app.max_history {
+                    let extra = app.command_history.len() - app.max_history;
+                    app.command_history.drain(0..extra);
+                }
+                app.set_info(format!(
+                    "dev mode client config updated in memory: max_history={max_history}"
+                ));
+            }
+            _ => {
+                app.set_error(
+                    "expected: /cc set show_help_at_startup true|false or /cc set max_history <n>",
+                );
+            }
+        }
+        return Ok(());
+    }
+
     let mut client_config = load_or_create_client_config(&app.player_name)?;
     match path {
         "show_help_at_startup" => {
