@@ -9,7 +9,7 @@ mod render;
 
 use crate::{
     app::{App, SyncState, handle_server_message},
-    client_files::{load_command_history, load_or_create_client_config},
+    client_files::{ephemeral_client_config, load_command_history, load_or_create_client_config},
     input::handle_event,
     network::{
         Connection, RECONNECT_ATTEMPT_TIMEOUT, connect_session, offline_snapshot,
@@ -28,6 +28,11 @@ use ratatui::DefaultTerminal;
 use std::{env, fs, io, path::PathBuf, time::Duration};
 use tokio::time::{self, timeout};
 
+struct ClientRuntimeOptions {
+    player_name: String,
+    dev_mode: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -42,11 +47,8 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--replay requires a replay artifact path"))?;
         run_replay_app(terminal, PathBuf::from(path)).await
     } else {
-        let name = args
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "worker-ant".to_string());
-        run_app(terminal, name).await
+        let options = parse_client_options(&args)?;
+        run_app(terminal, options).await
     };
 
     ratatui::restore();
@@ -108,6 +110,34 @@ async fn run_replay_app(mut terminal: DefaultTerminal, replay_path: PathBuf) -> 
     Ok(())
 }
 
+fn parse_client_options(args: &[String]) -> Result<ClientRuntimeOptions> {
+    let mut dev_mode = false;
+    let mut player_name = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dev" => dev_mode = true,
+            value if value.starts_with('-') => {
+                return Err(anyhow::anyhow!("unknown client option: {value}"));
+            }
+            value => {
+                if player_name.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "expected at most one player name, got extra argument: {value}"
+                    ));
+                }
+                player_name = Some(value.to_string());
+            }
+        }
+        index += 1;
+    }
+
+    Ok(ClientRuntimeOptions {
+        player_name: player_name.unwrap_or_else(|| "worker-ant".to_string()),
+        dev_mode,
+    })
+}
+
 fn sync_replay_pheromone_map(app: &mut App, game: &GameState) {
     let Some(channel) = app.pheromone_overlay else {
         app.pheromone_map = None;
@@ -120,17 +150,24 @@ fn sync_replay_pheromone_map(app: &mut App, game: &GameState) {
     app.pheromone_map = Some(game.pheromone_map(hive_id, channel));
 }
 
-async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {
-    let client_config = load_or_create_client_config(&player_name)?;
+async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -> Result<()> {
+    let client_config = if options.dev_mode {
+        ephemeral_client_config()
+    } else {
+        load_or_create_client_config(&options.player_name)?
+    };
     let client_token = client_config.token.clone();
     let mut app = App::new(
-        player_name.clone(),
+        options.player_name.clone(),
         0,
         offline_snapshot(),
         client_config.show_help_at_startup,
         client_config.max_history,
     );
-    app.command_history = load_command_history(&player_name, app.max_history)?;
+    app.persist_client_files = !options.dev_mode;
+    if app.persist_client_files {
+        app.command_history = load_command_history(&options.player_name, app.max_history)?;
+    }
     app.sync_state = SyncState::Connecting;
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));

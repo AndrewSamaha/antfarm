@@ -48,6 +48,15 @@ If you omit the name, the client defaults to `worker-ant`:
 ./antfarm client
 ```
 
+For multiplayer testing from the same folder without reusing the disk-backed token/history:
+
+```bash
+./antfarm client --dev scout-a
+./antfarm client --dev scout-b
+```
+
+`--dev` uses a random in-memory client token, defaults to not showing help at startup, and does not read or write client config/history files.
+
 To run the headless determinism test:
 
 ```bash
