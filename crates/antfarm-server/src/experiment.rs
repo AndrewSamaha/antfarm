@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use antfarm_core::{DAY_TICKS, GameState, NpcKind, TICK_MILLIS, merge_config, set_config_path};
+use antfarm_core::{
+    DAY_TICKS, GameState, NpcKind, ReplayArtifact, Snapshot, TICK_MILLIS, merge_config,
+    set_config_path,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -59,6 +62,14 @@ pub(crate) struct ExperimentConfig {
     pub(crate) conditions: Vec<ExperimentCondition>,
     #[serde(default)]
     pub(crate) stop_conditions: StopConditionExpr,
+    #[serde(default)]
+    pub(crate) replay: ExperimentReplayConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct ExperimentReplayConfig {
+    #[serde(default)]
+    pub(crate) save: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,8 +201,11 @@ pub(crate) struct ExperimentRunContext {
     pub(crate) analysis_metrics: Vec<String>,
     pub(crate) visualizations: Vec<ExperimentVisualizationSpec>,
     pub(crate) stop_conditions: StopConditionExpr,
+    pub(crate) replay_save: bool,
     #[serde(skip_serializing)]
     pub(crate) finished: bool,
+    #[serde(skip_serializing)]
+    pub(crate) initial_snapshot: Option<Snapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,7 +284,9 @@ pub(crate) fn maybe_create_run_context(
         analysis_metrics: experiment_config.analysis.metrics.clone(),
         visualizations: experiment_config.visualizations.clone(),
         stop_conditions: experiment_config.stop_conditions.clone(),
+        replay_save: experiment_config.replay.save,
         finished: false,
+        initial_snapshot: None,
     };
     write_run_manifest(&context)?;
     Ok(Some(context))
@@ -429,6 +445,9 @@ pub(crate) fn write_run_result(
     reason: &StopReason,
     game: &GameState,
 ) -> Result<()> {
+    let final_snapshot_hash = game
+        .final_snapshot_hash_hex()
+        .context("compute final snapshot hash")?;
     let worker_count = game
         .npcs
         .iter()
@@ -447,6 +466,7 @@ pub(crate) fn write_run_result(
     let summary = json!({
         "stop_reason": reason,
         "randomized_seed": context.randomized_seed,
+        "final_snapshot_hash": final_snapshot_hash,
         "start_tick": context.start_tick,
         "tick": game.tick,
         "simulation_length": game.tick.saturating_sub(context.start_tick),
@@ -463,7 +483,10 @@ pub(crate) fn write_run_result(
         "world": {
             "width": game.world.width(),
             "height": game.world.height(),
-        }
+        },
+        "replay_artifact_path": context
+            .replay_save
+            .then(|| replay_artifact_path(context).display().to_string()),
     });
     fs::write(
         context.run_dir.join("result.json"),
@@ -481,6 +504,10 @@ pub(crate) fn write_run_result(
             "simulation_length": game.tick.saturating_sub(context.start_tick),
         }),
     );
+    if context.replay_save {
+        write_replay_artifact(context, game, &final_snapshot_hash)
+            .context("write replay artifact")?;
+    }
     if let Err(error) = run_post_run_analysis(context) {
         write_analysis_error(context, "post_run_error.txt", &error.to_string())?;
     }
@@ -490,6 +517,43 @@ pub(crate) fn write_run_result(
     if let Err(error) = run_experiment_visualizations(context) {
         write_analysis_error(context, "visualization_error.txt", &error.to_string())?;
     }
+    Ok(())
+}
+
+pub(crate) fn replay_artifact_path(context: &ExperimentRunContext) -> PathBuf {
+    context.run_dir.join("replay").join("replay.json")
+}
+
+fn write_replay_artifact(
+    context: &ExperimentRunContext,
+    game: &GameState,
+    final_snapshot_hash: &str,
+) -> Result<()> {
+    let initial_snapshot = context
+        .initial_snapshot
+        .clone()
+        .context("missing initial snapshot for replay artifact")?;
+    let artifact = ReplayArtifact::new(
+        initial_snapshot,
+        game.tick.saturating_sub(context.start_tick),
+        final_snapshot_hash.to_string(),
+        json!({
+            "source": "experiment",
+            "experiment_dir": context.experiment_dir.display().to_string(),
+            "run_dir": context.run_dir.display().to_string(),
+            "condition_name": context.condition_name,
+            "randomized_seed": context.randomized_seed,
+        }),
+    )
+    .context("build replay artifact")?;
+    let path = replay_artifact_path(context);
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("invalid replay artifact path: {}", path.display());
+    };
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create replay artifact dir {}", parent.display()))?;
+    fs::write(&path, serde_json::to_vec_pretty(&artifact)?)
+        .with_context(|| format!("write replay artifact {}", path.display()))?;
     Ok(())
 }
 
@@ -511,6 +575,9 @@ fn write_run_manifest(context: &ExperimentRunContext) -> Result<()> {
         "analysis_metrics": context.analysis_metrics,
         "visualizations": context.visualizations,
         "stop_conditions": context.stop_conditions,
+        "replay": {
+            "save": context.replay_save,
+        },
     });
     fs::write(
         context.run_dir.join("manifest.json"),

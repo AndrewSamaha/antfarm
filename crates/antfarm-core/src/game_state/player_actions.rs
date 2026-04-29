@@ -15,18 +15,27 @@ const QUEEN_ART_ID: &str = "queen_ant";
 
 impl GameState {
     pub fn dig_area(&mut self, player_id: u8, width: u16, height: u16) -> Result<(), String> {
+        let Some(player) = self.players.get(&player_id).cloned() else {
+            return Err("unknown player".to_string());
+        };
+        self.dig_area_at(player.pos, width, height, Some(player.name))
+    }
+
+    pub fn dig_area_at(
+        &mut self,
+        center: Position,
+        width: u16,
+        height: u16,
+        actor_label: Option<String>,
+    ) -> Result<(), String> {
         if width == 0 || height == 0 {
             return Err("dig dimensions must be greater than zero".to_string());
         }
 
-        let Some(player) = self.players.get(&player_id).cloned() else {
-            return Err("unknown player".to_string());
-        };
-
         let half_w = i32::from(width) / 2;
         let half_h = i32::from(height) / 2;
-        let left = player.pos.x - half_w;
-        let top = player.pos.y - half_h;
+        let left = center.x - half_w;
+        let top = center.y - half_h;
 
         let mut dirt = 0u16;
         let mut stone = 0u16;
@@ -53,28 +62,37 @@ impl GameState {
             }
         }
 
-        let Some(player) = self.players.get_mut(&player_id) else {
-            return Err("unknown player".to_string());
-        };
-        let player_name = player.name.clone();
-        if dirt > 0 {
-            add_inventory(&mut player.inventory, "dirt", dirt);
+        if let Some(player_name) = actor_label {
+            let Some(player) = self
+                .players
+                .values_mut()
+                .find(|player| player.name == player_name)
+            else {
+                return Err("unknown player".to_string());
+            };
+            if dirt > 0 {
+                add_inventory(&mut player.inventory, "dirt", dirt);
+            }
+            if stone > 0 {
+                add_inventory(&mut player.inventory, "stone", stone);
+            }
+            if ore > 0 {
+                add_inventory(&mut player.inventory, "ore", ore);
+            }
+            if food > 0 {
+                add_inventory(&mut player.inventory, "food", food);
+            }
+            self.players_dirty = true;
+            self.push_event(format!(
+                "{} excavated {}x{} around the colony",
+                player_name, width, height
+            ));
+        } else {
+            self.push_event(format!(
+                "Server excavated {}x{} at {},{}",
+                width, height, center.x, center.y
+            ));
         }
-        if stone > 0 {
-            add_inventory(&mut player.inventory, "stone", stone);
-        }
-        if ore > 0 {
-            add_inventory(&mut player.inventory, "ore", ore);
-        }
-        if food > 0 {
-            add_inventory(&mut player.inventory, "food", food);
-        }
-        let _ = player;
-        self.players_dirty = true;
-        self.push_event(format!(
-            "{} excavated {}x{} around the colony",
-            player_name, width, height
-        ));
         Ok(())
     }
 
@@ -85,6 +103,71 @@ impl GameState {
         width: u16,
         height: u16,
     ) -> Result<(), String> {
+        let Some(player) = self.players.get(&player_id).cloned() else {
+            return Err("unknown player".to_string());
+        };
+        self.put_area_to_right_of(player.pos, resource, width, height, Some(player.name))
+    }
+
+    pub fn put_area_at(
+        &mut self,
+        center: Position,
+        resource: &str,
+        width: u16,
+        height: u16,
+        actor_label: Option<String>,
+    ) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Err("put dimensions must be greater than zero".to_string());
+        }
+
+        let tile = put_resource_tile(resource)
+            .ok_or_else(|| format!("unsupported put resource: {resource}"))?;
+        let half_w = i32::from(width) / 2;
+        let half_h = i32::from(height) / 2;
+        let left = center.x - half_w;
+        let top = center.y - half_h;
+        let mut placed = 0u16;
+
+        for dy in 0..i32::from(height) {
+            for dx in 0..i32::from(width) {
+                let pos = Position {
+                    x: left + dx,
+                    y: top + dy,
+                };
+                if !self.world.in_bounds(pos) || self.occupied_by_actor(pos) {
+                    continue;
+                }
+                if matches!(self.world.tile(pos), Some(Tile::Bedrock) | None) {
+                    continue;
+                }
+                self.set_world_tile(pos, tile);
+                placed = placed.saturating_add(1);
+            }
+        }
+
+        if let Some(actor_label) = actor_label {
+            self.push_event(format!(
+                "{} placed {} {} tiles centered at {},{}",
+                actor_label, placed, resource, center.x, center.y
+            ));
+        } else {
+            self.push_event(format!(
+                "Server placed {} {} tiles centered at {},{}",
+                placed, resource, center.x, center.y
+            ));
+        }
+        Ok(())
+    }
+
+    fn put_area_to_right_of(
+        &mut self,
+        origin: Position,
+        resource: &str,
+        width: u16,
+        height: u16,
+        actor_label: Option<String>,
+    ) -> Result<(), String> {
         if width == 0 || height == 0 {
             return Err("put dimensions must be greater than zero".to_string());
         }
@@ -92,12 +175,8 @@ impl GameState {
         let tile = put_resource_tile(resource)
             .ok_or_else(|| format!("unsupported put resource: {resource}"))?;
 
-        let Some(player) = self.players.get(&player_id).cloned() else {
-            return Err("unknown player".to_string());
-        };
-
-        let left = player.pos.x + 1;
-        let top = player.pos.y;
+        let left = origin.x + 1;
+        let top = origin.y;
         let mut placed = 0u16;
 
         for dy in 0..=i32::from(height) {
@@ -117,10 +196,17 @@ impl GameState {
             }
         }
 
-        self.push_event(format!(
-            "{} placed {} {} tiles to the right",
-            player.name, placed, resource
-        ));
+        if let Some(actor_label) = actor_label {
+            self.push_event(format!(
+                "{} placed {} {} tiles to the right",
+                actor_label, placed, resource
+            ));
+        } else {
+            self.push_event(format!(
+                "Server placed {} {} tiles to the right",
+                placed, resource
+            ));
+        }
         Ok(())
     }
 

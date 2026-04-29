@@ -50,6 +50,8 @@ Useful fields in an experiment `server.yaml`:
   If `true`, the run overrides `config.world.seed` with the current wall-clock timestamp in milliseconds. The chosen seed is written into the run manifest.
 - `experiment.tick_millis`
   Overrides the server tick interval for that experiment run. Lower values run the simulation faster in wall-clock time.
+- `experiment.replay.save`
+  If `true`, the run writes a deterministic replay artifact to `runs/run-<timestamp>/replay/replay.json`.
 - `experiment.analysis.metrics`
   Explicit metric ids to compute after run completion. The hook writes `runs/run-<timestamp>/analysis/metrics.json`, and any numeric values there are folded into `results.html`.
 - `experiment.visualizations`

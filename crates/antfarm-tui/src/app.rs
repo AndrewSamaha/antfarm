@@ -14,6 +14,8 @@ pub(crate) struct App {
     pub(crate) player_name: String,
     pub(crate) player_id: u8,
     pub(crate) snapshot: Snapshot,
+    pub(crate) mode: AppMode,
+    pub(crate) camera_center: Position,
     pub(crate) show_help: bool,
     pub(crate) show_params: bool,
     pub(crate) params_scroll: u16,
@@ -32,6 +34,12 @@ pub(crate) struct App {
     pub(crate) action_animation: Option<ActionAnimation>,
     pub(crate) queen_idle_states: HashMap<Position, QueenIdleState>,
     pub(crate) sync_state: SyncState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppMode {
+    Live,
+    Replay,
 }
 
 #[derive(Debug, Clone)]
@@ -74,7 +82,9 @@ impl App {
         Self {
             player_name,
             player_id,
+            camera_center: default_camera_center(&snapshot.world),
             snapshot,
+            mode: AppMode::Live,
             show_help,
             show_params: false,
             params_scroll: 0,
@@ -96,11 +106,76 @@ impl App {
         }
     }
 
+    pub(crate) fn new_replay(snapshot: Snapshot, max_history: usize) -> Self {
+        let camera_center = preferred_camera_center(&snapshot);
+        Self {
+            player_name: "replay-viewer".to_string(),
+            player_id: 0,
+            snapshot,
+            mode: AppMode::Replay,
+            camera_center,
+            show_help: true,
+            show_params: false,
+            params_scroll: 0,
+            show_events: false,
+            show_npc_bars: false,
+            pheromone_overlay: None,
+            pheromone_map: None,
+            pending_command: PendingCommand::None,
+            command_input: None,
+            command_feedback: None,
+            command_history: Vec::new(),
+            command_history_index: None,
+            last_error: None,
+            last_info: None,
+            max_history,
+            action_animation: None,
+            queen_idle_states: HashMap::new(),
+            sync_state: SyncState::Ready,
+        }
+    }
+
     pub(crate) fn player(&self) -> Option<&Player> {
         self.snapshot
             .players
             .iter()
             .find(|player| player.id == self.player_id)
+    }
+
+    pub(crate) fn is_replay(&self) -> bool {
+        self.mode == AppMode::Replay
+    }
+
+    pub(crate) fn focus_position(&self) -> Position {
+        self.player()
+            .map(|player| player.pos)
+            .unwrap_or(self.camera_center)
+    }
+
+    pub(crate) fn preferred_hive_id(&self) -> Option<u16> {
+        self.player()
+            .and_then(|player| player.hive_id)
+            .or_else(|| self.snapshot.npcs.iter().find_map(|npc| npc.hive_id))
+            .or_else(|| self.snapshot.placed_art.iter().find_map(|placed| placed.hive_id))
+    }
+
+    pub(crate) fn pan_camera(&mut self, dir: MoveDir) {
+        let (dx, dy) = dir.delta();
+        let max_x = self.snapshot.world.width().saturating_sub(1);
+        let max_y = self.snapshot.world.height().saturating_sub(1);
+        self.camera_center = Position {
+            x: (self.camera_center.x + dx).clamp(0, max_x),
+            y: (self.camera_center.y + dy).clamp(0, max_y),
+        };
+    }
+
+    pub(crate) fn toggle_local_pause(&mut self) {
+        self.snapshot.simulation_paused = !self.snapshot.simulation_paused;
+        if self.snapshot.simulation_paused {
+            self.set_info("Replay paused");
+        } else {
+            self.set_info("Replay running");
+        }
     }
 
     pub(crate) fn tick_animation(&mut self) {
@@ -335,6 +410,23 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn preferred_camera_center(snapshot: &Snapshot) -> Position {
+    snapshot
+        .npcs
+        .iter()
+        .find(|npc| matches!(npc.kind, antfarm_core::NpcKind::Queen))
+        .map(|npc| npc.pos)
+        .or_else(|| snapshot.players.first().map(|player| player.pos))
+        .unwrap_or_else(|| default_camera_center(&snapshot.world))
+}
+
+fn default_camera_center(world: &World) -> Position {
+    Position {
+        x: world.width() / 2,
+        y: world.height() / 2,
     }
 }
 

@@ -18,32 +18,106 @@ use crate::{
     render::draw,
 };
 use anyhow::Result;
-use antfarm_core::ClientMessage;
+use antfarm_core::{ClientMessage, GameState, ReplayArtifact, TICK_MILLIS};
 use crossterm::{
     event::EventStream,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::DefaultTerminal;
-use std::{env, io, time::Duration};
+use std::{env, fs, io, path::PathBuf, time::Duration};
 use tokio::time::{self, timeout};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let name = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "worker-ant".to_string());
+    let args: Vec<String> = env::args().skip(1).collect();
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let terminal = ratatui::init();
 
-    let result = run_app(terminal, name).await;
+    let result = if args.first().is_some_and(|arg| arg == "--replay") {
+        let path = args
+            .get(1)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("--replay requires a replay artifact path"))?;
+        run_replay_app(terminal, PathBuf::from(path)).await
+    } else {
+        let name = args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "worker-ant".to_string());
+        run_app(terminal, name).await
+    };
 
     ratatui::restore();
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
 
     result
+}
+
+async fn run_replay_app(mut terminal: DefaultTerminal, replay_path: PathBuf) -> Result<()> {
+    let raw = fs::read_to_string(&replay_path)?;
+    let artifact = serde_json::from_str::<ReplayArtifact>(&raw)?;
+    let mut snapshot = artifact.initial_snapshot.clone();
+    snapshot.simulation_paused = true;
+    let mut app = App::new_replay(snapshot, 100);
+    app.set_info(format!("Loaded replay {}", replay_path.display()));
+    let mut game = GameState::from_replay_snapshot(artifact.initial_snapshot.clone());
+    sync_replay_pheromone_map(&mut app, &game);
+    let mut events = EventStream::new();
+    let mut redraw = time::interval(Duration::from_millis(33));
+    let mut playback = time::interval(Duration::from_millis(TICK_MILLIS));
+    redraw.tick().await;
+    playback.tick().await;
+    let mut finished = false;
+
+    loop {
+        terminal.draw(|frame| draw(frame, &app))?;
+
+        tokio::select! {
+            _ = redraw.tick() => app.tick_animation(),
+            _ = playback.tick(), if !app.snapshot.simulation_paused && !finished => {
+                if game.tick >= artifact.expected_final_tick {
+                    finished = true;
+                    app.snapshot.simulation_paused = true;
+                    app.set_info("Replay finished");
+                    continue;
+                }
+                game.tick();
+                app.snapshot = game.snapshot();
+                app.snapshot.simulation_paused = false;
+                sync_replay_pheromone_map(&mut app, &game);
+                if game.tick >= artifact.expected_final_tick {
+                    finished = true;
+                    app.snapshot.simulation_paused = true;
+                    app.set_info("Replay finished");
+                }
+            }
+            maybe_event = tokio_stream_event(&mut events) => {
+                if let Some(event) = maybe_event? {
+                    if handle_event(event, &mut app, None).await? {
+                        break;
+                    }
+                    sync_replay_pheromone_map(&mut app, &game);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_replay_pheromone_map(app: &mut App, game: &GameState) {
+    let Some(channel) = app.pheromone_overlay else {
+        app.pheromone_map = None;
+        return;
+    };
+    let Some(hive_id) = app.preferred_hive_id() else {
+        app.pheromone_map = None;
+        return;
+    };
+    app.pheromone_map = Some(game.pheromone_map(hive_id, channel));
 }
 
 async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {

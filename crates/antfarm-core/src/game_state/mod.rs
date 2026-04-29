@@ -149,6 +149,66 @@ impl GameState {
         }
     }
 
+    pub fn from_replay_snapshot(snapshot: Snapshot) -> Self {
+        let config = merge_with_default_config(snapshot.config.clone());
+        let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
+        let next_hive_id = snapshot
+            .placed_art
+            .iter()
+            .filter_map(|placed| placed.hive_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let next_npc_id = snapshot
+            .npcs
+            .iter()
+            .map(|npc| npc.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut players = HashMap::new();
+        let next_player_id = snapshot
+            .players
+            .iter()
+            .map(|player| player.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for player in snapshot.players {
+            players.insert(player.id, player);
+        }
+        let pheromones = PheromoneGrid::empty(snapshot.world.width(), snapshot.world.height());
+        Self {
+            tick: snapshot.tick,
+            world: snapshot.world,
+            pheromones,
+            players,
+            npcs: snapshot.npcs,
+            placed_art: snapshot.placed_art,
+            event_log: snapshot.event_log,
+            config,
+            simulation_paused: snapshot.simulation_paused,
+            found_food_count: 0,
+            delivered_food_count: 0,
+            egg_laid_count: 0,
+            egg_hatched_count: 0,
+            npc_debug_enabled: false,
+            npc_debug_events: Vec::new(),
+            dig_progress: HashMap::new(),
+            dirty_tiles: HashMap::new(),
+            players_dirty: true,
+            npcs_dirty: true,
+            placed_art_dirty: true,
+            event_log_dirty: true,
+            config_dirty: true,
+            simulation_paused_dirty: true,
+            rng: StdRng::seed_from_u64(seed ^ 0xAB_CD_EF),
+            next_player_id,
+            next_hive_id,
+            next_npc_id,
+        }
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let mut players: Vec<_> = self.players.values().cloned().collect();
         players.sort_by_key(|player| player.id);
@@ -162,6 +222,10 @@ impl GameState {
             config: self.config.clone(),
             simulation_paused: self.simulation_paused,
         }
+    }
+
+    pub fn final_snapshot_hash_hex(&self) -> Result<String, serde_json::Error> {
+        self.snapshot().deterministic_hash_hex()
     }
 
     pub fn pheromone_map(&self, hive_id: u16, channel: PheromoneChannel) -> PheromoneMap {
@@ -356,5 +420,172 @@ impl GameState {
             let local_y = pos.y - placed.pos.y;
             asset.glyph_pair_at_world(local_x, local_y).is_some()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GameState;
+    use crate::{
+        art::find_ascii_art_asset,
+        inventory::default_npc_inventory,
+        pheromones::AntBehaviorState,
+        protocol::PlacedArt,
+        replay::ReplayArtifact,
+        types::{NpcAnt, NpcKind, Position},
+    };
+    use serde_json::json;
+    use std::{fs, path::PathBuf};
+
+    #[test]
+    fn headless_simulation_is_deterministic_for_same_seed() {
+        let config = json!({
+            "world": { "seed": 12345 },
+            "soil": {
+                "settle_frequency": 0.05,
+                "plant_growth_frequency": 0.01,
+                "vertical_growth_multiple": 2.0
+            },
+            "colony": {
+                "ambient_worker_count": 0
+            }
+        });
+
+        let mut first = GameState::from_config(config.clone());
+        let mut second = GameState::from_config(config);
+        seed_test_colony(&mut first);
+        seed_test_colony(&mut second);
+        let initial_snapshot = first.snapshot();
+        let initial_first_hash = initial_snapshot
+            .deterministic_hash_hex()
+            .expect("hash initial first snapshot");
+        let initial_second_hash = second
+            .final_snapshot_hash_hex()
+            .expect("hash initial second snapshot");
+        let mut first_hashes = Vec::new();
+        let mut second_hashes = Vec::new();
+
+        for _ in 0..400 {
+            first.tick();
+            second.tick();
+            first_hashes.push(first.final_snapshot_hash_hex().expect("hash first snapshot"));
+            second_hashes.push(second.final_snapshot_hash_hex().expect("hash second snapshot"));
+        }
+
+        assert_eq!(initial_first_hash, initial_second_hash);
+        assert_eq!(first_hashes, second_hashes);
+        assert_ne!(
+            initial_first_hash,
+            first_hashes
+                .last()
+                .expect("simulation should produce at least one snapshot hash")
+                .as_str()
+        );
+
+        let replay_artifact = ReplayArtifact::new(
+            initial_snapshot.clone(),
+            400,
+            first_hashes
+                .last()
+                .expect("simulation should produce at least one snapshot hash")
+                .clone(),
+            json!({
+                "source": "headless_determinism_test",
+                "ticks": 400,
+            }),
+        )
+        .expect("build replay artifact");
+        let replay_verification = replay_artifact.replay().expect("replay artifact");
+        assert!(replay_verification.matches_expected);
+
+        let replay_dir = replay_artifact_dir();
+        fs::create_dir_all(&replay_dir).expect("create replay artifact dir");
+        fs::write(
+            replay_dir.join("replay.json"),
+            serde_json::to_vec_pretty(&replay_artifact).expect("serialize replay artifact"),
+        )
+        .expect("write replay artifact");
+    }
+
+    fn replay_artifact_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("repo root")
+            .join(".artifacts/tests/replays/headless-determinism/latest")
+    }
+
+    fn seed_test_colony(game: &mut GameState) {
+        let center_x = game.world.width() / 2;
+        let center_y = game.world.spawn_y_for_column(center_x) + 80;
+        let chamber_center = Position {
+            x: center_x,
+            y: center_y,
+        };
+
+        game
+            .dig_area_at(chamber_center, 35, 25, None)
+            .expect("dig deterministic test chamber");
+        let asset = find_ascii_art_asset("queen_ant").expect("queen art asset");
+        let hive_id = game.next_hive_id;
+        game.next_hive_id = game.next_hive_id.saturating_add(1);
+        game.placed_art.push(PlacedArt {
+            asset_id: "queen_ant".to_string(),
+            pos: Position {
+                x: chamber_center.x - asset.world_anchor_x(),
+                y: chamber_center.y - asset.anchor_y,
+            },
+            hive_id: Some(hive_id),
+        });
+        game.npcs.push(NpcAnt {
+            id: game.next_npc_id,
+            pos: chamber_center,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Queen,
+            health: NpcKind::Queen.max_health(),
+            food: 0,
+            hive_id: Some(hive_id),
+            age_ticks: 0,
+            behavior: AntBehaviorState::Idle,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+        });
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs_dirty = true;
+        game.placed_art_dirty = true;
+        game.set_queen_eggs(10).expect("seed queen eggs");
+        seed_test_food(game, chamber_center);
+    }
+
+    fn seed_test_food(game: &mut GameState, queen_pos: Position) {
+        for food_center in [
+            Position {
+                x: queen_pos.x - 23,
+                y: queen_pos.y,
+            },
+            Position {
+                x: queen_pos.x + 23,
+                y: queen_pos.y,
+            },
+            Position {
+                x: queen_pos.x,
+                y: queen_pos.y - 23,
+            },
+        ] {
+            game.put_area_at(food_center, "food", 5, 5, None)
+                .expect("seed deterministic test food");
+        }
     }
 }

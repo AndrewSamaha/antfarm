@@ -27,6 +27,12 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         }
     };
 
+    let pause_line = if app.is_replay() {
+        "p: pause or unpause replay playback"
+    } else {
+        "p: pause or unpause simulation"
+    };
+
     let lines = vec![
         Line::from("hjkl: move or auto-dig"),
         Line::from("Space d h/j/k/l: place dirt"),
@@ -34,7 +40,7 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Space f h/j/k/l: place food"),
         Line::from("Space q, then h/j/k/l: preview and place queen"),
         Line::from("Tab: toggle NPC health/food bars"),
-        Line::from("p: pause or unpause simulation"),
+        Line::from(pause_line),
         Line::from("o: cycle pheromone overlay (home/food/off)"),
         Line::from("/help"),
         Line::from("/cc set show_help_at_startup false"),
@@ -53,7 +59,9 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("/sc set queen.eggs 1"),
         Line::from("/sc kill @e[type=worker,hive=none]"),
         Line::from("/sc dig 20 12"),
+        Line::from("/sc dig 44 63 20 12"),
         Line::from("/sc put food 5 5"),
+        Line::from("/sc put food 44 63 5 5"),
         Line::from("/sc debug.npc start"),
         Line::from("/sc debug.npc stop"),
         Line::from("/sc debug.npc status"),

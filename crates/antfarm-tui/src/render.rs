@@ -178,9 +178,6 @@ fn draw_world(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(player) = app.player() else {
-        return;
-    };
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -190,7 +187,12 @@ fn draw_world(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let viewport = Viewport::follow(player.pos, world_width, inner.height, &app.snapshot.world);
+    let viewport = Viewport::follow(
+        app.focus_position(),
+        world_width,
+        inner.height,
+        &app.snapshot.world,
+    );
     let mut lines = Vec::with_capacity(inner.height as usize);
 
     for screen_y in 0..inner.height {
