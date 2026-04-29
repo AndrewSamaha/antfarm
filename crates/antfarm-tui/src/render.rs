@@ -223,7 +223,7 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         let color = if player.id == app.player_id {
             Color::Green
         } else {
-            Color::Cyan
+            Color::LightBlue
         };
         let glyph = if player.id == app.player_id {
             animated_player_glyph(app)
@@ -271,7 +271,10 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         Tile::Dirt => Span::styled("▓▓", base_tile_style(Color::Gray, overlay_bg)),
         Tile::Stone => Span::styled("██", base_tile_style(Color::White, overlay_bg)),
         Tile::Resource => Span::styled("▒▒", base_tile_style(Color::LightCyan, overlay_bg)),
-        Tile::Food => Span::styled("&&", base_tile_style(Color::Green, overlay_bg)),
+        Tile::Food => Span::styled(
+            "&&",
+            base_tile_style(Color::Rgb(0, 128, 0), overlay_bg),
+        ),
         Tile::Bedrock => Span::styled("██", base_tile_style(Color::DarkGray, overlay_bg)),
     }
 }

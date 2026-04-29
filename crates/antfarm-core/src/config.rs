@@ -19,6 +19,10 @@ pub fn merge_with_default_config(config: Value) -> Value {
 
 fn default_config() -> Value {
     json!({
+        "network": {
+            "bind_host": "0.0.0.0",
+            "port": 14461
+        },
         "soil": {
             "settle_frequency": DEFAULT_SOIL_SETTLE_FREQUENCY,
             "plant_growth_frequency": DEFAULT_PLANT_GROWTH_FREQUENCY,
@@ -202,6 +206,20 @@ pub fn config_u16(root: &Value, path: &str, default: u16) -> u16 {
         .as_u64()
         .and_then(|value| u16::try_from(value).ok())
         .unwrap_or(default)
+}
+
+pub fn config_string(root: &Value, path: &str, default: &str) -> String {
+    let mut current = root;
+    for segment in path.split('.').filter(|segment| !segment.trim().is_empty()) {
+        let Some(next) = current.get(segment) else {
+            return default.to_string();
+        };
+        current = next;
+    }
+    current
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default.to_string())
 }
 
 pub fn merge_config(base: Value, incoming: Value) -> Value {

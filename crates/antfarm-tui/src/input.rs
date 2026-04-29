@@ -50,6 +50,21 @@ pub(crate) async fn handle_event(
     }
 
     if !app.is_ready() {
+        if app.is_selecting_server() {
+            match key.code {
+                KeyCode::Char('q') => return Ok(true),
+                KeyCode::Char('?') => app.show_help = !app.show_help,
+                KeyCode::Char('j') | KeyCode::Down => app.move_server_selection(1),
+                KeyCode::Char('k') | KeyCode::Up => app.move_server_selection(-1),
+                KeyCode::Enter => {
+                    if !app.choose_selected_server() {
+                        app.set_error("no server selected");
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         if matches!(key.code, KeyCode::Char('q')) {
             return Ok(true);
         }

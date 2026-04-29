@@ -14,7 +14,7 @@ mod world;
 
 pub use art::{AsciiArtAsset, find_ascii_art_asset};
 pub use config::{
-    config_f64, config_i32, config_u16, config_u64, default_server_config, merge_config,
+    config_f64, config_i32, config_string, config_u16, config_u64, default_server_config, merge_config,
     merge_with_default_config, set_config_path,
 };
 pub use constants::{

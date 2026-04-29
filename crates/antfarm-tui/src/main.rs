@@ -2,14 +2,16 @@ mod app;
 mod art;
 mod client_files;
 mod commands;
+mod discovery;
 mod input;
 mod modals;
 mod network;
 mod render;
 
 use crate::{
-    app::{App, SyncState, handle_server_message},
-    client_files::{load_command_history, load_or_create_client_config},
+    app::{App, handle_server_message},
+    client_files::{ephemeral_client_config, load_command_history, load_or_create_client_config},
+    discovery::{DiscoveryUpdate, probe_localhost_server, spawn_mdns_discovery},
     input::handle_event,
     network::{
         Connection, RECONNECT_ATTEMPT_TIMEOUT, connect_session, offline_snapshot,
@@ -28,6 +30,12 @@ use ratatui::DefaultTerminal;
 use std::{env, fs, io, path::PathBuf, time::Duration};
 use tokio::time::{self, timeout};
 
+struct ClientRuntimeOptions {
+    player_name: String,
+    dev_mode: bool,
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -42,11 +50,8 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--replay requires a replay artifact path"))?;
         run_replay_app(terminal, PathBuf::from(path)).await
     } else {
-        let name = args
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "worker-ant".to_string());
-        run_app(terminal, name).await
+        let options = parse_client_options(&args)?;
+        run_app(terminal, options).await
     };
 
     ratatui::restore();
@@ -108,6 +113,49 @@ async fn run_replay_app(mut terminal: DefaultTerminal, replay_path: PathBuf) -> 
     Ok(())
 }
 
+fn parse_client_options(args: &[String]) -> Result<ClientRuntimeOptions> {
+    let mut dev_mode = false;
+    let mut player_name = None;
+    let mut port = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dev" => dev_mode = true,
+            "--port" => {
+                let raw = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--port requires a value"))?;
+                let parsed = raw
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("--port must be a valid u16"))?;
+                if parsed == 0 {
+                    return Err(anyhow::anyhow!("--port must be greater than zero"));
+                }
+                index += 1;
+                port = Some(parsed);
+            }
+            value if value.starts_with('-') => {
+                return Err(anyhow::anyhow!("unknown client option: {value}"));
+            }
+            value => {
+                if player_name.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "expected at most one player name, got extra argument: {value}"
+                    ));
+                }
+                player_name = Some(value.to_string());
+            }
+        }
+        index += 1;
+    }
+
+    Ok(ClientRuntimeOptions {
+        player_name: player_name.unwrap_or_else(|| "worker-ant".to_string()),
+        dev_mode,
+        port: port.unwrap_or(14461),
+    })
+}
+
 fn sync_replay_pheromone_map(app: &mut App, game: &GameState) {
     let Some(channel) = app.pheromone_overlay else {
         app.pheromone_map = None;
@@ -120,22 +168,38 @@ fn sync_replay_pheromone_map(app: &mut App, game: &GameState) {
     app.pheromone_map = Some(game.pheromone_map(hive_id, channel));
 }
 
-async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<()> {
-    let client_config = load_or_create_client_config(&player_name)?;
+async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -> Result<()> {
+    let client_config = if options.dev_mode {
+        ephemeral_client_config()
+    } else {
+        load_or_create_client_config(&options.player_name)?
+    };
     let client_token = client_config.token.clone();
     let mut app = App::new(
-        player_name.clone(),
+        options.player_name.clone(),
         0,
         offline_snapshot(),
         client_config.show_help_at_startup,
         client_config.max_history,
     );
-    app.command_history = load_command_history(&player_name, app.max_history)?;
-    app.sync_state = SyncState::Connecting;
+    app.persist_client_files = !options.dev_mode;
+    if app.persist_client_files {
+        app.command_history = load_command_history(&options.player_name, app.max_history)?;
+    }
+    app.begin_server_selection();
+    if let Some(localhost) = probe_localhost_server(options.port).await {
+        app.upsert_discovered_server(localhost);
+    }
     let mut events = EventStream::new();
     let mut redraw = time::interval(Duration::from_millis(33));
     let mut reconnect = time::interval(Duration::from_millis(1000));
     let mut pheromone_refresh = time::interval(Duration::from_millis(500));
+    let localhost_port = app
+        .discovered_servers
+        .iter()
+        .find(|server| matches!(server.source, crate::discovery::DiscoverySource::Localhost))
+        .map(|server| server.port);
+    let mut discovery_rx = spawn_mdns_discovery(localhost_port);
     reconnect.tick().await;
     pheromone_refresh.tick().await;
     let mut connection: Option<Connection> = None;
@@ -145,8 +209,15 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
 
         tokio::select! {
             _ = redraw.tick() => app.tick_animation(),
-            _ = reconnect.tick(), if connection.is_none() => {
-                match timeout(RECONNECT_ATTEMPT_TIMEOUT, connect_session(&app.player_name, &client_token)).await {
+            _ = reconnect.tick(), if connection.is_none() && app.selected_server_addr.is_some() && !app.is_selecting_server() => {
+                let server_addr = app
+                    .selected_server_addr
+                    .clone()
+                    .expect("guard ensures selected server addr");
+                match timeout(
+                    RECONNECT_ATTEMPT_TIMEOUT,
+                    connect_session(&app.player_name, &client_token, &server_addr),
+                ).await {
                     Ok(Ok(new_connection)) => {
                         app.begin_syncing();
                         connection = Some(new_connection);
@@ -173,6 +244,13 @@ async fn run_app(mut terminal: DefaultTerminal, player_name: String) -> Result<(
                         connection = None;
                         app.enter_reconnecting("attempting to reconnect".to_string());
                     }
+                }
+            }
+            Some(update) = discovery_rx.recv() => {
+                match update {
+                    DiscoveryUpdate::Upsert(server) => app.upsert_discovered_server(server),
+                    DiscoveryUpdate::Remove { id } => app.remove_discovered_server(&id),
+                    DiscoveryUpdate::Error(message) => app.set_error(message),
                 }
             }
             maybe_event = tokio_stream_event(&mut events) => {

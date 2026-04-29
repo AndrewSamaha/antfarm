@@ -48,6 +48,23 @@ If you omit the name, the client defaults to `worker-ant`:
 ./antfarm client
 ```
 
+To connect to a non-default localhost port:
+
+```bash
+./antfarm client --port 14461 scout
+```
+
+For multiplayer testing from the same folder without reusing the disk-backed token/history:
+
+```bash
+./antfarm client --dev scout-a
+./antfarm client --dev scout-b
+```
+
+`--dev` uses a random in-memory client token, defaults to not showing help at startup, and does not read or write client config/history files.
+
+On startup, the live client now shows a server-selection list. It always includes localhost on the configured port and also lists antfarm servers discovered on the LAN via mDNS. Use `j/k` or the arrow keys to choose a server and press `Enter` to connect.
+
 To run the headless determinism test:
 
 ```bash
@@ -84,6 +101,22 @@ This defaults to `./server.yaml` in your current directory. You can still point 
 ```bash
 ./antfarm server --server-config ./experiments/experiment-1/server.yaml
 ./antfarm server --server-config ./experiments/experiment-1
+```
+
+The server bind settings now come from `server.yaml`:
+
+- `config.network.bind_host`
+  defaults to `0.0.0.0` so the server is reachable from other machines on the LAN
+- `config.network.port`
+  defaults to `14461`
+
+If you want localhost-only behavior again, set:
+
+```yaml
+config:
+  network:
+    bind_host: 127.0.0.1
+    port: 14461
 ```
 
 If that experiment config defines named conditions, select one explicitly:
