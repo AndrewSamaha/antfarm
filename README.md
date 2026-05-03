@@ -134,3 +134,37 @@ To run the same experiment config multiple times:
 Use `h j k l` to move; filled tiles auto-dig. Use `Space d h/j/k/l` to place dirt and `Space s h/j/k/l` to place stone. Press `/` to enter a slash command like `/sc set soil.settle_frequency 0.01`, `/sc set world.max_depth -255`, `/sc show_params`, or `/sc world_reset`, `?` to toggle the help modal, and `q` to quit.
 
 The server saves the latest world snapshots to `data/antfarm.sqlite3`, restores the newest one on startup, snapshots every `world.snapshot_interval` seconds by default, and prunes history down to the newest 10 snapshots after each save.
+
+## Experiments
+
+Experiment definitions live under `experiments/`. The `server.yaml` files stay in Git, while generated run artifacts are synced through S3 at `s3://antfarm/experiments/`.
+
+To pull the current shared experiment state onto your machine:
+
+```bash
+scripts/sync-experiments-pull.sh
+```
+
+To run a single condition or a batch:
+
+```bash
+./antfarm server --server-config ./experiments/experiment-1 --condition baseline
+./antfarm experiment --server-config ./experiments/experiment-1 --num-runs 10
+```
+
+Successful experiment runs and visualization generation mark the local `experiments/` tree as having unpushed data by creating `experiments/.unpushed_data`.
+
+To push local experiment artifacts back to S3:
+
+```bash
+scripts/sync-experiments-push.sh
+```
+
+Recommended workflow:
+
+1. `scripts/sync-experiments-pull.sh`
+2. Commit the code changes that should be associated with the run artifacts.
+3. Run the experiment or regenerate visualizations.
+4. `scripts/sync-experiments-push.sh`
+
+`sync-experiments-push.sh` writes `experiments/.sync_state.json` before upload. That file records the current Git branch, commit id, push time, and the latest discovered run metadata, including the run id and a SHA-256 hash of the run-local `server.yaml`.
