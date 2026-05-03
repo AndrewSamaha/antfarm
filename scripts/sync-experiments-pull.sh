@@ -60,4 +60,8 @@ src="$EXPERIMENTS_S3_URI"
 dst="experiments/"
 
 echo "Syncing $src -> $dst"
-exec aws s3 sync "$src" "$dst" --exclude ".unpushed_data" "${extra_args[@]}"
+if [[ ${#extra_args[@]} -eq 0 ]]; then
+  exec aws s3 sync "$src" "$dst" --exclude ".unpushed_data"
+else
+  exec aws s3 sync "$src" "$dst" --exclude ".unpushed_data" "${extra_args[@]}"
+fi

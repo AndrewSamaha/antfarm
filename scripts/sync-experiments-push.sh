@@ -72,7 +72,11 @@ src="experiments/"
 dst="$EXPERIMENTS_S3_URI"
 
 echo "Syncing $src -> $dst"
-aws s3 sync "$src" "$dst" --exclude ".unpushed_data" "${extra_args[@]}"
+if [[ ${#extra_args[@]} -eq 0 ]]; then
+  aws s3 sync "$src" "$dst" --exclude ".unpushed_data"
+else
+  aws s3 sync "$src" "$dst" --exclude ".unpushed_data" "${extra_args[@]}"
+fi
 if [[ $dryrun_requested -eq 0 ]]; then
   rm -f "$EXPERIMENTS_UNPUSHED_MARKER"
 fi
