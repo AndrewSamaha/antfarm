@@ -3,3 +3,6 @@
 .DS_Store
 debuglog.sqlite*
 codex-resume.md
+/experiments/**
+!/experiments/**/
+!/experiments/**/server.yaml
