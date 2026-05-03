@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/experiments_sync_common.sh"
 
 usage() {
   cat <<'EOF'
@@ -49,10 +50,14 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p experiments
+ensure_experiments_dir
 
-src="s3://antfarm/experiments/"
+if [[ -f "$EXPERIMENTS_UNPUSHED_MARKER" ]]; then
+  echo "warning: local experiment artifacts may be newer than S3; $EXPERIMENTS_UNPUSHED_MARKER exists" >&2
+fi
+
+src="$EXPERIMENTS_S3_URI"
 dst="experiments/"
 
 echo "Syncing $src -> $dst"
-exec aws s3 sync "$src" "$dst" "${extra_args[@]}"
+exec aws s3 sync "$src" "$dst" --exclude ".unpushed_data" "${extra_args[@]}"

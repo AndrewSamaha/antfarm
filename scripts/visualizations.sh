@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/experiments_sync_common.sh"
 
 usage() {
   cat <<'EOF'
@@ -60,3 +61,7 @@ uv run --project analysis python -m antfarm_visualizations.cli \
 
 uv run --project analysis python -m antfarm_aggregation.cli \
   --experiment-dir "$experiment_dir"
+
+if is_experiment_server_config "$server_config"; then
+  mark_experiments_dirty
+fi
