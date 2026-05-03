@@ -1,27 +1,40 @@
 use rand::Rng;
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const RECENT_POSITION_MEMORY_SIZE: usize = 5;
+const FOOD_GATHERER_ROLE_PATH: &str = DEFAULT_WORKER_ROLE_PATH;
+const QUEEN_CHAMBER_ROLE_PATH: &str = "hive_maintenance.queen_chamber";
+const INITIAL_QUEEN_CHAMBER_RADIUS: i32 = 2;
+const DEFAULT_QUEEN_CHAMBER_RADIUS_X: i32 = 20;
+const DEFAULT_QUEEN_CHAMBER_RADIUS_Y: i32 = 15;
 
 use crate::{
     config::{config_f64, config_i32, config_u16, config_u64},
     constants::{
         DEFAULT_PLANT_GROWTH_FREQUENCY, DEFAULT_SOIL_SETTLE_FREQUENCY,
         DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE, EGG_HATCH_TICKS, NPC_WORKER_LIFESPAN_TICKS,
-        PHEROMONE_DECAY_AMOUNT,
-        PHEROMONE_DECAY_INTERVAL_TICKS, PHEROMONE_MEMORY_RADIUS, PHEROMONE_MEMORY_TICKS,
-        QUEEN_EGG_FOOD_COST, QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS, SURFACE_Y,
-        WORKER_FOOD_DEPOSIT_DECAY_STEPS, WORKER_FOOD_DEPOSIT_FLOOR, WORKER_FOOD_DEPOSIT_PEAK,
-        WORKER_HOME_DEPOSIT, WORKER_HOME_DEPOSIT_DECAY_STEPS,
+        PHEROMONE_DECAY_AMOUNT, PHEROMONE_DECAY_INTERVAL_TICKS, PHEROMONE_MEMORY_RADIUS,
+        PHEROMONE_MEMORY_TICKS, QUEEN_EGG_FOOD_COST, QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS,
+        SURFACE_Y, WORKER_FOOD_DEPOSIT_DECAY_STEPS, WORKER_FOOD_DEPOSIT_FLOOR,
+        WORKER_FOOD_DEPOSIT_PEAK, WORKER_HOME_DEPOSIT, WORKER_HOME_DEPOSIT_DECAY_STEPS,
     },
     inventory::{add_inventory, default_npc_inventory, inventory_count, remove_inventory},
     npc::nearest_open_tile,
     pheromones::{AntBehaviorState, PheromoneChannel},
-    types::{MoveDir, NpcAnt, NpcKind, Position, Tile},
+    types::{
+        DEFAULT_WORKER_ROLE_PATH, MoveDir, NpcAnt, NpcKind, Position, QueenChamberGrowthMode, Tile,
+    },
 };
 
 use super::GameState;
+
+#[derive(Debug, Clone)]
+struct WorkerRoleDefinition {
+    path: String,
+    lifespan_ticks: u16,
+    weight: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchBehaviorProfile {
@@ -30,6 +43,29 @@ enum SearchBehaviorProfile {
     LocalFieldV1,
     LocalFieldV2,
     OutwardBiasWithLocalFieldV1,
+}
+
+pub(crate) fn random_queen_chamber_growth_mode<R: Rng + ?Sized>(
+    rng: &mut R,
+) -> QueenChamberGrowthMode {
+    if rng.random::<bool>() {
+        QueenChamberGrowthMode::Outward
+    } else {
+        QueenChamberGrowthMode::Inward
+    }
+}
+
+pub(crate) fn queen_chamber_initial_radii_for_mode(
+    mode: QueenChamberGrowthMode,
+    max_x: i32,
+    max_y: i32,
+) -> (i32, i32) {
+    let initial_radius_x = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_x);
+    let initial_radius_y = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_y);
+    match mode {
+        QueenChamberGrowthMode::Outward => (initial_radius_x, initial_radius_y),
+        QueenChamberGrowthMode::Inward => (max_x, max_y),
+    }
 }
 
 impl GameState {
@@ -77,7 +113,7 @@ impl GameState {
     fn tick_worker(&mut self, index: usize, events: &mut Vec<String>) {
         if self.npcs[index].hive_id.is_some() {
             self.npcs[index].age_ticks = self.npcs[index].age_ticks.saturating_add(1);
-            if self.npcs[index].age_ticks >= self.worker_lifespan_ticks() {
+            if self.npcs[index].age_ticks >= self.worker_lifespan_ticks_for(index) {
                 let npc_id = self.npcs[index].id;
                 let npc_hive = self.npcs[index].hive_id;
                 let npc_pos = self.npcs[index].pos;
@@ -96,21 +132,36 @@ impl GameState {
                 return;
             }
         }
+        let npc_hive = self.npcs[index].hive_id;
+        let queen_pos = npc_hive.and_then(|hive_id| self.find_queen_pos(hive_id));
+        match self.worker_role_path(index) {
+            FOOD_GATHERER_ROLE_PATH => {}
+            QUEEN_CHAMBER_ROLE_PATH => {
+                self.tick_queen_chamber_worker(index, queen_pos, events);
+                return;
+            }
+            _ => {
+                if self.npcs[index].behavior != AntBehaviorState::Idle {
+                    self.npcs[index].behavior = AntBehaviorState::Idle;
+                    self.npcs_dirty = true;
+                }
+                return;
+            }
+        }
         self.tick_worker_memory(index);
         let npc_pos = self.npcs[index].pos;
         let npc_id = self.npcs[index].id;
-        let npc_hive = self.npcs[index].hive_id;
         let behavior = self.npcs[index].behavior;
-        let queen_pos = npc_hive.and_then(|hive_id| self.find_queen_pos(hive_id));
-        let home_axes = npc_hive.map(|hive_id| {
-            self.sample_gradient_axes(npc_pos, hive_id, PheromoneChannel::Home)
-        });
-        let food_axes = npc_hive.map(|hive_id| {
-            self.sample_gradient_axes(npc_pos, hive_id, PheromoneChannel::Food)
-        });
+        let home_axes = npc_hive
+            .map(|hive_id| self.sample_gradient_axes(npc_pos, hive_id, PheromoneChannel::Home));
+        let food_axes = npc_hive
+            .map(|hive_id| self.sample_gradient_axes(npc_pos, hive_id, PheromoneChannel::Food));
         let current_food_pheromone = u32::from(
             npc_hive
-                .map(|hive_id| self.pheromones.value(npc_pos, hive_id, PheromoneChannel::Food))
+                .map(|hive_id| {
+                    self.pheromones
+                        .value(npc_pos, hive_id, PheromoneChannel::Food)
+                })
                 .unwrap_or(0),
         );
         let search_profile = self.search_behavior_profile();
@@ -140,7 +191,8 @@ impl GameState {
             match behavior {
                 AntBehaviorState::Searching => {}
                 AntBehaviorState::ReturningFood => {
-                    let deposit = food_deposit_for_carry_ticks(self.npcs[index].carrying_food_ticks);
+                    let deposit =
+                        food_deposit_for_carry_ticks(self.npcs[index].carrying_food_ticks);
                     self.pheromones
                         .deposit(npc_pos, hive_id, PheromoneChannel::Food, deposit);
                     if self.try_deliver_food_to_queen(index) {
@@ -152,7 +204,8 @@ impl GameState {
             }
         }
 
-        if behavior == AntBehaviorState::Searching && self.try_place_dirt(index, queen_pos, events) {
+        if behavior == AntBehaviorState::Searching && self.try_place_dirt(index, queen_pos, events)
+        {
             self.npcs_dirty = true;
             return;
         }
@@ -168,7 +221,7 @@ impl GameState {
             if next.y <= SURFACE_Y {
                 continue;
             }
-            if !self.world.in_bounds(next) || self.npc_occupied(next, Some(index)) {
+            if !self.world.in_bounds(next) || self.npc_blocks_movement(next, index) {
                 continue;
             }
             let tile = self.world.tile(next);
@@ -205,12 +258,20 @@ impl GameState {
                 _ => 0_u32,
             };
             let memory_bias = u32::from(match behavior {
-                AntBehaviorState::Searching => direction_bias(self.npcs[index].recent_food_dir, npc_pos, next),
-                AntBehaviorState::ReturningFood => direction_bias(self.npcs[index].recent_home_dir, npc_pos, next),
+                AntBehaviorState::Searching => {
+                    direction_bias(self.npcs[index].recent_food_dir, npc_pos, next)
+                }
+                AntBehaviorState::ReturningFood => {
+                    direction_bias(self.npcs[index].recent_home_dir, npc_pos, next)
+                }
                 AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
             });
             let search_profile_bias = match (behavior, effective_search_profile, queen_pos) {
-                (AntBehaviorState::Searching, SearchBehaviorProfile::OutwardBiasV1, Some(queen_pos)) => {
+                (
+                    AntBehaviorState::Searching,
+                    SearchBehaviorProfile::OutwardBiasV1,
+                    Some(queen_pos),
+                ) => {
                     let current = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
                     let next_dist = (queen_pos.x - next.x).abs() + (queen_pos.y - next.y).abs();
                     if next_dist > current {
@@ -224,16 +285,24 @@ impl GameState {
                 _ => 0_u32,
             };
             let local_field_search = match (behavior, effective_search_profile, npc_hive) {
-                (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV1, Some(hive_id))
-                | (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(hive_id)) => {
-                    Some(self.local_field_search_bias(next, hive_id))
-                }
+                (
+                    AntBehaviorState::Searching,
+                    SearchBehaviorProfile::LocalFieldV1,
+                    Some(hive_id),
+                )
+                | (
+                    AntBehaviorState::Searching,
+                    SearchBehaviorProfile::LocalFieldV2,
+                    Some(hive_id),
+                ) => Some(self.local_field_search_bias(next, hive_id)),
                 _ => None,
             };
             let destination_bias = match (behavior, effective_search_profile, search_destination) {
-                (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(destination)) => {
-                    local_field_destination_bias(npc_pos, next, destination)
-                }
+                (
+                    AntBehaviorState::Searching,
+                    SearchBehaviorProfile::LocalFieldV2,
+                    Some(destination),
+                ) => local_field_destination_bias(npc_pos, next, destination),
                 _ => 0_u32,
             };
             let carry_harvest_bias = if !carry_visible_food_targets.is_empty() {
@@ -257,7 +326,8 @@ impl GameState {
             } else {
                 0_u32
             };
-            let recent_position_penalty = recent_position_penalty(&self.npcs[index].recent_positions, next);
+            let recent_position_penalty =
+                recent_position_penalty(&self.npcs[index].recent_positions, next);
             raw_candidates.push((
                 next,
                 tile,
@@ -278,7 +348,9 @@ impl GameState {
         let has_increasing_adjacent_food_signal = matches!(behavior, AntBehaviorState::Searching)
             && raw_candidates
                 .iter()
-                .any(|(_, _, food_pheromone, _, _, _, _, _, _, _, _, _, _)| *food_pheromone > current_food_pheromone);
+                .any(|(_, _, food_pheromone, _, _, _, _, _, _, _, _, _, _)| {
+                    *food_pheromone > current_food_pheromone
+                });
 
         let mut candidates = Vec::new();
         let mut candidate_logs = Vec::new();
@@ -299,12 +371,16 @@ impl GameState {
         ) in raw_candidates
         {
             let pheromone_score = match behavior {
-                AntBehaviorState::Searching if effective_search_profile == SearchBehaviorProfile::LocalFieldV1 => {
+                AntBehaviorState::Searching
+                    if effective_search_profile == SearchBehaviorProfile::LocalFieldV1 =>
+                {
                     local_field_search
                         .map(|score| score.visible_food_bonus + score.food_field_score)
                         .unwrap_or(0)
                 }
-                AntBehaviorState::Searching if effective_search_profile == SearchBehaviorProfile::LocalFieldV2 => {
+                AntBehaviorState::Searching
+                    if effective_search_profile == SearchBehaviorProfile::LocalFieldV2 =>
+                {
                     destination_bias
                 }
                 AntBehaviorState::Searching if has_increasing_adjacent_food_signal => {
@@ -329,9 +405,8 @@ impl GameState {
                 + memory_bias
                 + search_profile_bias
                 + carry_harvest_bias;
-            let score = score.saturating_sub(
-                terrain_penalty + recent_position_penalty + local_field_penalty,
-            );
+            let score = score
+                .saturating_sub(terrain_penalty + recent_position_penalty + local_field_penalty);
             candidates.push((score, next, tile));
             candidate_logs.push(json!({
                 "next": { "x": next.x, "y": next.y },
@@ -400,8 +475,10 @@ impl GameState {
                 Some(Tile::Food) if !matches!(behavior, AntBehaviorState::ReturningFood) => {
                     self.set_world_tile(next, Tile::Empty);
                     self.npcs[index].pos = next;
-                    let lifespan_bonus =
-                        worker_lifespan_bonus(self.npcs[index].age_ticks, self.worker_lifespan_ticks());
+                    let lifespan_bonus = worker_lifespan_bonus(
+                        self.npcs[index].age_ticks,
+                        self.worker_lifespan_ticks_for(index),
+                    );
                     self.npcs[index].age_ticks =
                         self.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
                     let previous_carried = self.npcs[index].food;
@@ -409,8 +486,8 @@ impl GameState {
                         previous_carried.saturating_add(1).min(food_carry_max);
                     self.npcs[index].carrying_food = true;
                     self.npcs[index].food = carried_after_pickup;
-                    let keep_collecting = carried_after_pickup < food_carry_max
-                        && self.adjacent_food_visible(next);
+                    let keep_collecting =
+                        carried_after_pickup < food_carry_max && self.adjacent_food_visible(next);
                     self.npcs[index].behavior = if keep_collecting {
                         AntBehaviorState::Searching
                     } else {
@@ -448,8 +525,12 @@ impl GameState {
                 }
                 Some(Tile::Dirt) | Some(Tile::Resource) => {
                     match tile {
-                        Some(Tile::Dirt) => add_inventory(&mut self.npcs[index].inventory, "dirt", 1),
-                        Some(Tile::Resource) => add_inventory(&mut self.npcs[index].inventory, "ore", 1),
+                        Some(Tile::Dirt) => {
+                            add_inventory(&mut self.npcs[index].inventory, "dirt", 1)
+                        }
+                        Some(Tile::Resource) => {
+                            add_inventory(&mut self.npcs[index].inventory, "ore", 1)
+                        }
                         _ => {}
                     }
                     self.set_world_tile(next, Tile::Empty);
@@ -513,7 +594,12 @@ impl GameState {
         });
     }
 
-    fn tick_queen(&mut self, index: usize, spawned_npcs: &mut Vec<NpcAnt>, events: &mut Vec<String>) {
+    fn tick_queen(
+        &mut self,
+        index: usize,
+        spawned_npcs: &mut Vec<NpcAnt>,
+        events: &mut Vec<String>,
+    ) {
         let queen_pos = self.npcs[index].pos;
         let queen_id = self.npcs[index].id;
         let queen_hive_id = self.npcs[index].hive_id;
@@ -587,6 +673,12 @@ impl GameState {
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
+            role: None,
+            chamber_radius_x: None,
+            chamber_radius_y: None,
+            chamber_anchor: None,
+            chamber_has_left_anchor: false,
+            chamber_growth_mode: QueenChamberGrowthMode::Outward,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.npcs_dirty = true;
@@ -624,16 +716,24 @@ impl GameState {
         {
             return;
         }
+        let assigned_role = self.choose_worker_role_for_hatch(egg_hive_id);
+        let starts_foraging = assigned_role.as_deref() == Some(FOOD_GATHERER_ROLE_PATH);
+        let queen_chamber_max_radii = (assigned_role.as_deref() == Some(QUEEN_CHAMBER_ROLE_PATH))
+            .then(|| self.queen_chamber_max_radii());
 
         let egg = &mut self.npcs[index];
         egg.kind = NpcKind::Worker;
         egg.health = NpcKind::Worker.max_health();
         egg.food = 0;
         egg.age_ticks = 0;
-        egg.behavior = AntBehaviorState::Searching;
+        egg.behavior = if starts_foraging {
+            AntBehaviorState::Searching
+        } else {
+            AntBehaviorState::Idle
+        };
         egg.carrying_food = false;
         egg.carrying_food_ticks = 0;
-        egg.home_trail_steps = Some(0);
+        egg.home_trail_steps = starts_foraging.then_some(0);
         egg.recent_home_dir = None;
         egg.recent_food_dir = None;
         egg.recent_home_memory_ticks = 0;
@@ -642,17 +742,37 @@ impl GameState {
         egg.search_destination = None;
         egg.search_destination_stuck_ticks = 0;
         egg.has_delivered_food = false;
+        egg.role = assigned_role.clone();
+        if let Some((max_x, max_y)) = queen_chamber_max_radii {
+            egg.chamber_growth_mode = random_queen_chamber_growth_mode(&mut self.rng);
+            let (radius_x, radius_y) =
+                queen_chamber_initial_radii_for_mode(egg.chamber_growth_mode, max_x, max_y);
+            egg.chamber_radius_x = Some(radius_x);
+            egg.chamber_radius_y = Some(radius_y);
+            egg.chamber_anchor = None;
+            egg.chamber_has_left_anchor = false;
+        } else {
+            egg.chamber_radius_x = None;
+            egg.chamber_radius_y = None;
+            egg.chamber_anchor = None;
+            egg.chamber_has_left_anchor = false;
+            egg.chamber_growth_mode = QueenChamberGrowthMode::Outward;
+        }
         self.egg_hatched_count = self.egg_hatched_count.saturating_add(1);
         let hatched_id = egg.id;
         let hatched_hive_id = egg.hive_id;
         let hatched_pos = egg.pos;
+        let hatched_role = egg
+            .role
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WORKER_ROLE_PATH.to_string());
         if let Some(queen_index) = queen_index {
             self.npcs[queen_index].last_egg_hatched_tick = Some(self.tick);
         }
         self.npcs_dirty = true;
         events.push(format!(
-            "Egg {} hatched into a worker ant",
-            hatched_id
+            "Egg {} hatched into a {} worker ant",
+            hatched_id, hatched_role
         ));
         self.push_npc_debug_event(crate::NpcDebugEvent {
             tick: self.tick,
@@ -660,8 +780,300 @@ impl GameState {
             hive_id: hatched_hive_id,
             event_type: "egg_hatched".to_string(),
             pos: hatched_pos,
-            details: json!({}),
+            details: json!({
+                "role": hatched_role,
+                "behavior_after": behavior_name(self.npcs[index].behavior),
+            }),
         });
+    }
+
+    fn tick_queen_chamber_worker(
+        &mut self,
+        index: usize,
+        queen_pos: Option<Position>,
+        events: &mut Vec<String>,
+    ) {
+        if self.npcs[index].behavior != AntBehaviorState::Idle {
+            self.npcs[index].behavior = AntBehaviorState::Idle;
+            self.npcs_dirty = true;
+        }
+        let Some(queen_pos) = queen_pos else {
+            return;
+        };
+
+        let npc_pos = self.npcs[index].pos;
+        let queen_distance = floor_euclidean_distance(npc_pos, queen_pos);
+        let next_step = self.choose_queen_chamber_step(index, queen_pos);
+        let Some(next_step) = next_step else {
+            self.push_npc_debug_event(crate::NpcDebugEvent {
+                tick: self.tick,
+                npc_id: self.npcs[index].id,
+                hive_id: self.npcs[index].hive_id,
+                event_type: "queen_chamber_hold".to_string(),
+                pos: npc_pos,
+                details: json!({
+                    "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
+                    "queen_distance": queen_distance,
+                }),
+            });
+            return;
+        };
+
+        match self.world.tile(next_step) {
+            Some(Tile::Empty) => {
+                self.npcs[index].pos = next_step;
+                remember_recent_position(&mut self.npcs[index].recent_positions, next_step);
+                self.npcs_dirty = true;
+                self.push_npc_debug_event(crate::NpcDebugEvent {
+                    tick: self.tick,
+                    npc_id: self.npcs[index].id,
+                    hive_id: self.npcs[index].hive_id,
+                    event_type: "queen_chamber_move".to_string(),
+                    pos: npc_pos,
+                    details: json!({
+                        "next_step": { "x": next_step.x, "y": next_step.y },
+                        "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
+                        "queen_distance_before": queen_distance,
+                        "queen_distance_after": floor_euclidean_distance(next_step, queen_pos),
+                    }),
+                });
+            }
+            Some(Tile::Dirt) | Some(Tile::Resource) | Some(Tile::Food) => {
+                let traversed_tile = self.world.tile(next_step).unwrap_or(Tile::Empty);
+                match traversed_tile {
+                    Tile::Dirt => add_inventory(&mut self.npcs[index].inventory, "dirt", 1),
+                    Tile::Resource => add_inventory(&mut self.npcs[index].inventory, "ore", 1),
+                    _ => {}
+                };
+                self.set_world_tile(next_step, Tile::Empty);
+                self.npcs[index].pos = next_step;
+                remember_recent_position(&mut self.npcs[index].recent_positions, next_step);
+                self.npcs_dirty = true;
+                events.push(format!(
+                    "NPC ant {} cleared queen chamber path at {},{}",
+                    self.npcs[index].id, next_step.x, next_step.y
+                ));
+                self.push_npc_debug_event(crate::NpcDebugEvent {
+                    tick: self.tick,
+                    npc_id: self.npcs[index].id,
+                    hive_id: self.npcs[index].hive_id,
+                    event_type: "queen_chamber_dig".to_string(),
+                    pos: npc_pos,
+                    details: json!({
+                        "target": { "x": next_step.x, "y": next_step.y },
+                        "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
+                        "queen_distance_before": queen_distance,
+                    }),
+                });
+                self.push_npc_debug_event(crate::NpcDebugEvent {
+                    tick: self.tick,
+                    npc_id: self.npcs[index].id,
+                    hive_id: self.npcs[index].hive_id,
+                    event_type: "queen_chamber_move".to_string(),
+                    pos: npc_pos,
+                    details: json!({
+                        "next_step": { "x": next_step.x, "y": next_step.y },
+                        "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
+                        "queen_distance_before": queen_distance,
+                        "queen_distance_after": floor_euclidean_distance(next_step, queen_pos),
+                        "moved_through": tile_name(traversed_tile),
+                    }),
+                });
+            }
+            Some(Tile::Stone | Tile::Bedrock) | None => {}
+        }
+    }
+
+    fn worker_role_path(&self, index: usize) -> &str {
+        self.npcs[index]
+            .role
+            .as_deref()
+            .unwrap_or(DEFAULT_WORKER_ROLE_PATH)
+    }
+
+    fn choose_worker_role_for_hatch(&self, hive_id: Option<u16>) -> Option<String> {
+        let roles = self.configured_worker_roles();
+        if roles.is_empty() {
+            return Some(DEFAULT_WORKER_ROLE_PATH.to_string());
+        }
+
+        let mut role_counts: HashMap<&str, u16> = HashMap::new();
+        let mut hive_workers = 0u16;
+        for npc in &self.npcs {
+            if npc.kind != NpcKind::Worker || npc.health == 0 {
+                continue;
+            }
+            let in_same_hive = match hive_id {
+                Some(hive_id) => npc.hive_id == Some(hive_id),
+                None => npc.hive_id.is_none(),
+            };
+            if !in_same_hive {
+                continue;
+            }
+            hive_workers = hive_workers.saturating_add(1);
+            let role_path = npc.role.as_deref().unwrap_or(DEFAULT_WORKER_ROLE_PATH);
+            let entry = role_counts.entry(role_path).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+
+        let total_after_hatch = hive_workers.saturating_add(1);
+        let total_weight: u32 = roles.iter().map(|role| u32::from(role.weight)).sum();
+        if total_weight == 0 {
+            return Some(DEFAULT_WORKER_ROLE_PATH.to_string());
+        }
+
+        let mut best_role: Option<&WorkerRoleDefinition> = None;
+        let mut best_deficit = f64::NEG_INFINITY;
+        for role in &roles {
+            let current_count = f64::from(*role_counts.get(role.path.as_str()).unwrap_or(&0));
+            let desired_count =
+                f64::from(total_after_hatch) * f64::from(role.weight) / f64::from(total_weight);
+            let deficit = desired_count - current_count;
+            let should_replace = match best_role {
+                None => true,
+                Some(_) if deficit > best_deficit => true,
+                Some(current_best)
+                    if (deficit - best_deficit).abs() < f64::EPSILON
+                        && role.weight > current_best.weight =>
+                {
+                    true
+                }
+                Some(current_best)
+                    if (deficit - best_deficit).abs() < f64::EPSILON
+                        && role.weight == current_best.weight
+                        && role.path < current_best.path =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            if should_replace {
+                best_role = Some(role);
+                best_deficit = deficit;
+            }
+        }
+
+        best_role.map(|role| role.path.clone())
+    }
+
+    fn configured_worker_roles(&self) -> Vec<WorkerRoleDefinition> {
+        let mut roles = Vec::new();
+        if let Some(root) = self.config.pointer("/colony/roles") {
+            collect_worker_roles(root, &mut Vec::new(), &mut roles);
+        }
+        if roles.is_empty() {
+            roles.push(WorkerRoleDefinition {
+                path: DEFAULT_WORKER_ROLE_PATH.to_string(),
+                lifespan_ticks: NPC_WORKER_LIFESPAN_TICKS,
+                weight: 1,
+            });
+        }
+        roles.sort_by(|left, right| left.path.cmp(&right.path));
+        roles
+    }
+
+    fn choose_queen_chamber_step(&mut self, index: usize, queen_pos: Position) -> Option<Position> {
+        let origin = self.npcs[index].pos;
+        self.ensure_queen_chamber_radii_initialized(index);
+        let (mut radius_x, mut radius_y) = self.queen_chamber_current_radii(index);
+        let mut ring = queen_chamber_perimeter(
+            queen_pos,
+            radius_x,
+            radius_y,
+            self.world.width(),
+            self.world.height(),
+        );
+        if ring.is_empty() {
+            self.npcs[index].search_destination = None;
+            return None;
+        }
+
+        let current_index = ring.iter().position(|pos| *pos == origin);
+        let mut target_index = self.npcs[index]
+            .search_destination
+            .and_then(|target| ring.iter().position(|pos| *pos == target));
+
+        if let Some(initial_current_index) = current_index {
+            self.update_queen_chamber_growth_state(index, origin, &ring);
+            let (updated_radius_x, updated_radius_y) = self.queen_chamber_current_radii(index);
+            let current_index = if updated_radius_x != radius_x || updated_radius_y != radius_y {
+                radius_x = updated_radius_x;
+                radius_y = updated_radius_y;
+                ring = queen_chamber_perimeter(
+                    queen_pos,
+                    radius_x,
+                    radius_y,
+                    self.world.width(),
+                    self.world.height(),
+                );
+                target_index = None;
+                if ring.is_empty() {
+                    self.npcs[index].search_destination = None;
+                    return None;
+                }
+                match ring.iter().position(|pos| *pos == origin) {
+                    Some(current_index) => current_index,
+                    None => {
+                        let (step, target) = self
+                            .queen_chamber_bfs_to_any_ring_cell(index, origin, &ring, queen_pos)?;
+                        self.npcs[index].search_destination = Some(target);
+                        return Some(step);
+                    }
+                }
+            } else {
+                initial_current_index
+            };
+            let default_next = (current_index + 1) % ring.len();
+            if target_index.is_none() || target_index == Some(current_index) {
+                target_index = Some(default_next);
+            }
+            for offset in 0..ring.len() {
+                let candidate_index = (target_index.unwrap_or(default_next) + offset) % ring.len();
+                let target = ring[candidate_index];
+                if let Some(step) =
+                    self.queen_chamber_bfs_first_step(index, origin, target, queen_pos)
+                {
+                    self.npcs[index].search_destination = Some(target);
+                    return Some(step);
+                }
+            }
+            self.npcs[index].search_destination = None;
+            return None;
+        }
+
+        if let Some(target_index) = target_index {
+            let target = ring[target_index];
+            if let Some(step) = self.queen_chamber_bfs_first_step(index, origin, target, queen_pos)
+            {
+                self.npcs[index].search_destination = Some(target);
+                return Some(step);
+            }
+        }
+
+        let (step, target) =
+            self.queen_chamber_bfs_to_any_ring_cell(index, origin, &ring, queen_pos)?;
+        self.npcs[index].search_destination = Some(target);
+        Some(step)
+    }
+
+    fn queen_chamber_tile_traversable(&self, index: usize, pos: Position) -> bool {
+        if !self.world.in_bounds(pos)
+            || self.players.values().any(|player| player.pos == pos)
+            || self.npc_blocks_movement(pos, index)
+        {
+            return false;
+        }
+        matches!(
+            self.world.tile(pos),
+            Some(Tile::Empty | Tile::Dirt | Tile::Resource | Tile::Food)
+        )
+    }
+
+    fn npc_blocks_movement(&self, pos: Position, mover_index: usize) -> bool {
+        let mover_hive_id = self.npcs[mover_index].hive_id;
+        self.npcs.iter().enumerate().any(|(index, npc)| {
+            index != mover_index && npc.pos == pos && !same_hive(mover_hive_id, npc.hive_id)
+        })
     }
 
     fn npc_occupied(&self, pos: Position, ignore_index: Option<usize>) -> bool {
@@ -671,13 +1083,78 @@ impl GameState {
             .any(|(index, npc)| Some(index) != ignore_index && npc.pos == pos)
     }
 
+    fn queen_chamber_bfs_first_step(
+        &self,
+        index: usize,
+        origin: Position,
+        destination: Position,
+        queen_pos: Position,
+    ) -> Option<Position> {
+        if origin == destination {
+            return None;
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert(origin);
+        queue.push_back((origin, None::<Position>));
+
+        while let Some((pos, first_step)) = queue.pop_front() {
+            for next in queen_chamber_neighbor_order(pos, queen_pos) {
+                if visited.contains(&next) || !self.queen_chamber_tile_traversable(index, next) {
+                    continue;
+                }
+                let first_step = first_step.or(Some(next));
+                if next == destination {
+                    return first_step;
+                }
+                visited.insert(next);
+                queue.push_back((next, first_step));
+            }
+        }
+
+        None
+    }
+
+    fn queen_chamber_bfs_to_any_ring_cell(
+        &self,
+        index: usize,
+        origin: Position,
+        ring: &[Position],
+        queen_pos: Position,
+    ) -> Option<(Position, Position)> {
+        let ring_positions: HashSet<_> = ring.iter().copied().collect();
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert(origin);
+        queue.push_back((origin, None::<Position>));
+
+        while let Some((pos, first_step)) = queue.pop_front() {
+            for next in queen_chamber_neighbor_order(pos, queen_pos) {
+                if visited.contains(&next) || !self.queen_chamber_tile_traversable(index, next) {
+                    continue;
+                }
+                let first_step = first_step.or(Some(next));
+                if ring_positions.contains(&next) {
+                    return first_step.map(|step| (step, next));
+                }
+                visited.insert(next);
+                queue.push_back((next, first_step));
+            }
+        }
+
+        None
+    }
+
     fn try_place_dirt(
         &mut self,
         index: usize,
         queen_pos: Option<Position>,
         events: &mut Vec<String>,
     ) -> bool {
-        if self.npcs[index].carrying_food || inventory_count(&self.npcs[index].inventory, "dirt") == 0 {
+        if self.npcs[index].carrying_food
+            || inventory_count(&self.npcs[index].inventory, "dirt") == 0
+        {
             return false;
         }
         if let Some(last_tick) = self.npcs[index].last_dirt_place_tick
@@ -729,7 +1206,10 @@ impl GameState {
         self.set_world_tile(target, Tile::Dirt);
         self.npcs[index].last_dirt_place_tick = Some(self.tick);
         let npc_id = self.npcs[index].id;
-        events.push(format!("NPC ant {} placed dirt at {},{}", npc_id, target.x, target.y));
+        events.push(format!(
+            "NPC ant {} placed dirt at {},{}",
+            npc_id, target.x, target.y
+        ));
         self.push_npc_debug_event(crate::NpcDebugEvent {
             tick: self.tick,
             npc_id,
@@ -1081,8 +1561,16 @@ impl GameState {
                 continue;
             };
             let local = self.local_field_search_bias(candidate, hive_id);
-            let home_here = u32::from(self.pheromones.value(candidate, hive_id, PheromoneChannel::Home));
-            let food_here = u32::from(self.pheromones.value(candidate, hive_id, PheromoneChannel::Food));
+            let home_here = u32::from(self.pheromones.value(
+                candidate,
+                hive_id,
+                PheromoneChannel::Home,
+            ));
+            let food_here = u32::from(self.pheromones.value(
+                candidate,
+                hive_id,
+                PheromoneChannel::Food,
+            ));
             let tile_bonus = match tile {
                 Tile::Food => 1_200_u32,
                 Tile::Empty => 60_u32,
@@ -1101,7 +1589,9 @@ impl GameState {
                 })
                 .unwrap_or(0);
             let openness_bonus =
-                u32::try_from(self.open_cardinal_neighbor_count(candidate, Some(index))).unwrap_or(0) * 18;
+                u32::try_from(self.open_cardinal_neighbor_count(candidate, Some(index)))
+                    .unwrap_or(0)
+                    * 18;
             let distance_bonus = u32::try_from(distance).unwrap_or(0) * 20;
             let exploration_bonus = 255_u32.saturating_sub(home_here).min(80);
             let score = tile_bonus
@@ -1125,7 +1615,11 @@ impl GameState {
         best
     }
 
-    fn local_reachable_search_tiles(&self, index: usize, origin: Position) -> Vec<(Position, usize)> {
+    fn local_reachable_search_tiles(
+        &self,
+        index: usize,
+        origin: Position,
+    ) -> Vec<(Position, usize)> {
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
         let mut reachable = Vec::new();
@@ -1161,7 +1655,7 @@ impl GameState {
 
     fn search_tile_traversable(&self, index: usize, pos: Position) -> bool {
         if self.players.values().any(|player| player.pos == pos)
-            || self.npc_occupied(pos, Some(index))
+            || self.npc_blocks_movement(pos, index)
             || self.art_occupies_cell(pos)
         {
             return false;
@@ -1182,8 +1676,9 @@ impl GameState {
             return;
         };
         let Some(chosen_next) = chosen_next else {
-            self.npcs[index].search_destination_stuck_ticks =
-                self.npcs[index].search_destination_stuck_ticks.saturating_add(1);
+            self.npcs[index].search_destination_stuck_ticks = self.npcs[index]
+                .search_destination_stuck_ticks
+                .saturating_add(1);
             return;
         };
         if chosen_next == destination {
@@ -1196,8 +1691,9 @@ impl GameState {
         if next_distance < current_distance {
             self.npcs[index].search_destination_stuck_ticks = 0;
         } else {
-            self.npcs[index].search_destination_stuck_ticks =
-                self.npcs[index].search_destination_stuck_ticks.saturating_add(1);
+            self.npcs[index].search_destination_stuck_ticks = self.npcs[index]
+                .search_destination_stuck_ticks
+                .saturating_add(1);
         }
     }
 
@@ -1259,32 +1755,32 @@ impl GameState {
                 let down_left = pos.offset(-1, 1);
                 let left = pos.offset(-1, 0);
 
-                let target = if self.world.in_bounds(below) && self.world.tile(below) == Some(Tile::Empty)
-                {
-                    if !occupied.contains(&below) {
-                        Some(below)
+                let target =
+                    if self.world.in_bounds(below) && self.world.tile(below) == Some(Tile::Empty) {
+                        if !occupied.contains(&below) {
+                            Some(below)
+                        } else {
+                            None
+                        }
+                    } else if self.world.in_bounds(right)
+                        && self.world.in_bounds(down_right)
+                        && self.world.tile(right) == Some(Tile::Empty)
+                        && self.world.tile(down_right) == Some(Tile::Empty)
+                        && !occupied.contains(&right)
+                        && !occupied.contains(&down_right)
+                    {
+                        Some(down_right)
+                    } else if self.world.in_bounds(left)
+                        && self.world.in_bounds(down_left)
+                        && self.world.tile(left) == Some(Tile::Empty)
+                        && self.world.tile(down_left) == Some(Tile::Empty)
+                        && !occupied.contains(&left)
+                        && !occupied.contains(&down_left)
+                    {
+                        Some(down_left)
                     } else {
                         None
-                    }
-                } else if self.world.in_bounds(right)
-                    && self.world.in_bounds(down_right)
-                    && self.world.tile(right) == Some(Tile::Empty)
-                    && self.world.tile(down_right) == Some(Tile::Empty)
-                    && !occupied.contains(&right)
-                    && !occupied.contains(&down_right)
-                {
-                    Some(down_right)
-                } else if self.world.in_bounds(left)
-                    && self.world.in_bounds(down_left)
-                    && self.world.tile(left) == Some(Tile::Empty)
-                    && self.world.tile(down_left) == Some(Tile::Empty)
-                    && !occupied.contains(&left)
-                    && !occupied.contains(&down_left)
-                {
-                    Some(down_left)
-                } else {
-                    None
-                };
+                    };
 
                 let Some(target) = target else {
                     continue;
@@ -1397,12 +1893,19 @@ impl GameState {
 }
 
 impl GameState {
-    fn worker_lifespan_ticks(&self) -> u16 {
-        config_u16(
-            &self.config,
-            "colony.worker_lifespan_ticks",
-            NPC_WORKER_LIFESPAN_TICKS,
-        )
+    fn worker_lifespan_ticks_for(&self, index: usize) -> u16 {
+        let role_path = self.worker_role_path(index);
+        self.configured_worker_roles()
+            .into_iter()
+            .find(|role| role.path == role_path)
+            .map(|role| role.lifespan_ticks)
+            .unwrap_or_else(|| {
+                config_u16(
+                    &self.config,
+                    "colony.worker_lifespan_ticks",
+                    NPC_WORKER_LIFESPAN_TICKS,
+                )
+            })
     }
 
     fn queen_egg_food_cost(&self) -> u16 {
@@ -1443,6 +1946,96 @@ impl GameState {
         config_i32(&self.config, "colony.queen_no_fill_radius", 8).max(0)
     }
 
+    fn queen_chamber_max_radii(&self) -> (i32, i32) {
+        let radius_x = config_i32(
+            &self.config,
+            "colony.roles.hive_maintenance.queen_chamber.radius_x",
+            DEFAULT_QUEEN_CHAMBER_RADIUS_X,
+        )
+        .max(1);
+        let radius_y = config_i32(
+            &self.config,
+            "colony.roles.hive_maintenance.queen_chamber.radius_y",
+            DEFAULT_QUEEN_CHAMBER_RADIUS_Y,
+        )
+        .max(1);
+        (radius_x, radius_y)
+    }
+
+    fn ensure_queen_chamber_radii_initialized(&mut self, index: usize) {
+        if self.npcs[index].chamber_radius_x.is_some()
+            && self.npcs[index].chamber_radius_y.is_some()
+        {
+            return;
+        }
+        let (max_x, max_y) = self.queen_chamber_max_radii();
+        let (radius_x, radius_y) = queen_chamber_initial_radii_for_mode(
+            self.npcs[index].chamber_growth_mode,
+            max_x,
+            max_y,
+        );
+        self.npcs[index].chamber_radius_x = Some(radius_x);
+        self.npcs[index].chamber_radius_y = Some(radius_y);
+        self.npcs[index].chamber_anchor = None;
+        self.npcs[index].chamber_has_left_anchor = false;
+    }
+
+    fn queen_chamber_current_radii(&self, index: usize) -> (i32, i32) {
+        (
+            self.npcs[index]
+                .chamber_radius_x
+                .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
+            self.npcs[index]
+                .chamber_radius_y
+                .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
+        )
+    }
+
+    fn update_queen_chamber_growth_state(
+        &mut self,
+        index: usize,
+        pos: Position,
+        ring: &[Position],
+    ) {
+        if !ring.contains(&pos) {
+            return;
+        }
+        match self.npcs[index].chamber_anchor {
+            None => {
+                self.npcs[index].chamber_anchor = Some(pos);
+                self.npcs[index].chamber_has_left_anchor = false;
+            }
+            Some(anchor) if !self.npcs[index].chamber_has_left_anchor && pos != anchor => {
+                self.npcs[index].chamber_has_left_anchor = true;
+            }
+            Some(anchor) if self.npcs[index].chamber_has_left_anchor && pos == anchor => {
+                let (max_x, max_y) = self.queen_chamber_max_radii();
+                let min_x = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_x);
+                let min_y = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_y);
+                let current_x = self.npcs[index]
+                    .chamber_radius_x
+                    .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
+                let current_y = self.npcs[index]
+                    .chamber_radius_y
+                    .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
+                let (next_x, next_y) = match self.npcs[index].chamber_growth_mode {
+                    QueenChamberGrowthMode::Outward => {
+                        ((current_x + 1).min(max_x), (current_y + 1).min(max_y))
+                    }
+                    QueenChamberGrowthMode::Inward => {
+                        ((current_x - 1).max(min_x), (current_y - 1).max(min_y))
+                    }
+                };
+                self.npcs[index].chamber_radius_x = Some(next_x);
+                self.npcs[index].chamber_radius_y = Some(next_y);
+                self.npcs[index].chamber_anchor = None;
+                self.npcs[index].chamber_has_left_anchor = false;
+                self.npcs[index].search_destination = None;
+            }
+            _ => {}
+        }
+    }
+
     fn dirt_place_cooldown_ticks(&self) -> u64 {
         config_u64(&self.config, "colony.dirt_place_cooldown_ticks", 11)
     }
@@ -1479,7 +2072,9 @@ impl GameState {
             .and_then(Value::as_str)
             .unwrap_or("baseline")
         {
-            "outward_bias_with_local_field_v1" => SearchBehaviorProfile::OutwardBiasWithLocalFieldV1,
+            "outward_bias_with_local_field_v1" => {
+                SearchBehaviorProfile::OutwardBiasWithLocalFieldV1
+            }
             "local_field_v1" => SearchBehaviorProfile::LocalFieldV1,
             "local_field_v2" => SearchBehaviorProfile::LocalFieldV2,
             "outward_bias_v1" => SearchBehaviorProfile::OutwardBiasV1,
@@ -1544,6 +2139,171 @@ fn search_behavior_profile_name(profile: SearchBehaviorProfile) -> &'static str 
     }
 }
 
+fn same_hive(left: Option<u16>, right: Option<u16>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn collect_worker_roles(
+    value: &Value,
+    path: &mut Vec<String>,
+    roles: &mut Vec<WorkerRoleDefinition>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+
+    if !path.is_empty()
+        && let Some(weight) = object
+            .get("weight")
+            .and_then(Value::as_u64)
+            .and_then(|weight| u16::try_from(weight).ok())
+        && weight > 0
+    {
+        let lifespan_ticks = object
+            .get("lifespan")
+            .and_then(Value::as_u64)
+            .and_then(|lifespan| u16::try_from(lifespan).ok())
+            .unwrap_or(NPC_WORKER_LIFESPAN_TICKS);
+        roles.push(WorkerRoleDefinition {
+            path: path.join("."),
+            lifespan_ticks,
+            weight,
+        });
+    }
+
+    let mut child_keys: Vec<_> = object
+        .keys()
+        .filter(|key| !matches!(key.as_str(), "weight" | "lifespan"))
+        .collect();
+    child_keys.sort();
+    for key in child_keys {
+        let Some(child) = object.get(key) else {
+            continue;
+        };
+        if !child.is_object() {
+            continue;
+        }
+        path.push(key.clone());
+        collect_worker_roles(child, path, roles);
+        path.pop();
+    }
+}
+
+fn queen_chamber_perimeter(
+    queen: Position,
+    radius_x: i32,
+    radius_y: i32,
+    world_width: i32,
+    world_height: i32,
+) -> Vec<Position> {
+    let min_x = (queen.x - radius_x - 1).max(0);
+    let max_x = (queen.x + radius_x + 1).min(world_width.saturating_sub(1));
+    let min_y = (queen.y - radius_y - 1).max(0);
+    let max_y = (queen.y + radius_y + 1).min(world_height.saturating_sub(1));
+    let mut ring = Vec::new();
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let pos = Position { x, y };
+            let value = ellipse_boundary_value(pos, queen, radius_x, radius_y);
+            if value > 1.0 {
+                continue;
+            }
+            let touches_outside = [
+                pos.offset(-1, 0),
+                pos.offset(1, 0),
+                pos.offset(0, -1),
+                pos.offset(0, 1),
+            ]
+            .into_iter()
+            .any(|neighbor| {
+                !in_ellipse_bounds(neighbor, world_width, world_height)
+                    || ellipse_boundary_value(neighbor, queen, radius_x, radius_y) > 1.0
+            });
+            if touches_outside {
+                ring.push(pos);
+            }
+        }
+    }
+
+    ring.sort_by(|left, right| {
+        clockwise_angle(queen, *left)
+            .total_cmp(&clockwise_angle(queen, *right))
+            .then_with(|| {
+                ellipse_boundary_value(*right, queen, radius_x, radius_y)
+                    .total_cmp(&ellipse_boundary_value(*left, queen, radius_x, radius_y))
+            })
+            .then_with(|| left.y.cmp(&right.y))
+            .then_with(|| left.x.cmp(&right.x))
+    });
+    ring.dedup();
+    ring
+}
+
+fn in_ellipse_bounds(pos: Position, world_width: i32, world_height: i32) -> bool {
+    pos.x >= 0 && pos.y >= 0 && pos.x < world_width && pos.y < world_height
+}
+
+fn clockwise_tangent(current: Position, queen: Position) -> (i32, i32) {
+    let radial_x = current.x - queen.x;
+    let radial_y = current.y - queen.y;
+    let tangent = (-radial_y, radial_x);
+    if tangent.0 == 0 && tangent.1 == 0 {
+        (1, 0)
+    } else {
+        tangent
+    }
+}
+
+fn queen_chamber_neighbor_order(current: Position, queen: Position) -> [Position; 4] {
+    let tangent = clockwise_tangent(current, queen);
+    let radial = (current.x - queen.x, current.y - queen.y);
+    let clockwise = unit_cardinal_step(tangent);
+    let inward = unit_cardinal_step((-radial.0, -radial.1));
+    let outward = unit_cardinal_step(radial);
+    let counter_clockwise = (-clockwise.0, -clockwise.1);
+    [
+        current.offset(clockwise.0, clockwise.1),
+        current.offset(inward.0, inward.1),
+        current.offset(outward.0, outward.1),
+        current.offset(counter_clockwise.0, counter_clockwise.1),
+    ]
+}
+
+fn unit_cardinal_step((dx, dy): (i32, i32)) -> (i32, i32) {
+    if dx == 0 && dy == 0 {
+        return (1, 0);
+    }
+    if dx.abs() >= dy.abs() {
+        (dx.signum(), 0)
+    } else {
+        (0, dy.signum())
+    }
+}
+
+fn clockwise_angle(center: Position, pos: Position) -> f64 {
+    let dx = f64::from(pos.x - center.x);
+    let dy = f64::from(center.y - pos.y);
+    let angle = dx.atan2(dy);
+    if angle < 0.0 {
+        angle + std::f64::consts::TAU
+    } else {
+        angle
+    }
+}
+
+fn ellipse_boundary_value(pos: Position, center: Position, radius_x: i32, radius_y: i32) -> f64 {
+    let dx = f64::from(pos.x - center.x);
+    let dy = f64::from(pos.y - center.y);
+    let rx = f64::from(radius_x.max(1));
+    let ry = f64::from(radius_y.max(1));
+    ((dx * dx) / (rx * rx)) + ((dy * dy) / (ry * ry))
+}
+
 fn local_field_destination_bias(current: Position, next: Position, destination: Position) -> u32 {
     let current_distance = manhattan_distance(current, destination);
     let next_distance = manhattan_distance(next, destination);
@@ -1560,6 +2320,16 @@ fn local_field_destination_bias(current: Position, next: Position, destination: 
 
 fn manhattan_distance(a: Position, b: Position) -> i32 {
     (a.x - b.x).abs() + (a.y - b.y).abs()
+}
+
+fn euclidean_distance(a: Position, b: Position) -> f64 {
+    let dx = f64::from(a.x - b.x);
+    let dy = f64::from(a.y - b.y);
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn floor_euclidean_distance(a: Position, b: Position) -> i32 {
+    euclidean_distance(a, b).floor() as i32
 }
 
 fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position) {

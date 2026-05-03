@@ -20,13 +20,10 @@ pub(crate) async fn connect_session(
     client_token: &str,
     server_addr: &str,
 ) -> Result<Connection> {
-    let stream = timeout(
-        RECONNECT_ATTEMPT_TIMEOUT,
-        TcpStream::connect(server_addr),
-    )
-    .await
-    .context("timed out connecting to antfarm-server")?
-    .with_context(|| format!("connect to antfarm-server on {server_addr}"))?;
+    let stream = timeout(RECONNECT_ATTEMPT_TIMEOUT, TcpStream::connect(server_addr))
+        .await
+        .context("timed out connecting to antfarm-server")?
+        .with_context(|| format!("connect to antfarm-server on {server_addr}"))?;
 
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();

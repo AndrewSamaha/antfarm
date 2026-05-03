@@ -87,7 +87,11 @@ impl PheromoneGrid {
         let Some(cell) = self.cell_mut(pos) else {
             return;
         };
-        let entry = match cell.entries.iter_mut().find(|entry| entry.hive_id == hive_id) {
+        let entry = match cell
+            .entries
+            .iter_mut()
+            .find(|entry| entry.hive_id == hive_id)
+        {
             Some(entry) => entry,
             None => {
                 cell.entries.push(HivePheromone {
@@ -120,7 +124,9 @@ impl PheromoneGrid {
                     continue;
                 }
                 let falloff = distance as u8;
-                let amount = peak.saturating_sub(falloff.saturating_mul(peak.max(1) / (radius.max(1) as u8 + 1)));
+                let amount = peak.saturating_sub(
+                    falloff.saturating_mul(peak.max(1) / (radius.max(1) as u8 + 1)),
+                );
                 if amount > 0 {
                     self.deposit(pos, hive_id, channel, amount);
                 }

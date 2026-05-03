@@ -76,13 +76,19 @@ pub struct DigProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
-    Join { name: String, token: String },
+    Join {
+        name: String,
+        token: String,
+    },
     Action(Action),
     RequestPheromoneMap {
         hive_id: u16,
         channel: PheromoneChannel,
     },
-    ConfigSet { path: String, value: Value },
+    ConfigSet {
+        path: String,
+        value: Value,
+    },
     Give {
         target: String,
         resource: String,
@@ -125,7 +131,9 @@ pub enum ClientMessage {
     SetSimulationPaused {
         paused: bool,
     },
-    WorldReset { seed: Option<u64> },
+    WorldReset {
+        seed: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

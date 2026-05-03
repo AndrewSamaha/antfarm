@@ -97,7 +97,8 @@ pub(crate) fn save_command_history(
     }
     let start = history.len().saturating_sub(max_history);
     let content = history[start..].join("\n");
-    fs::write(&path, content).with_context(|| format!("write client history {}", path.display()))?;
+    fs::write(&path, content)
+        .with_context(|| format!("write client history {}", path.display()))?;
     Ok(())
 }
 

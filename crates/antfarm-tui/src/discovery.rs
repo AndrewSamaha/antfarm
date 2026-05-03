@@ -2,8 +2,11 @@ use anyhow::Result;
 use if_addrs::get_if_addrs;
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::{collections::HashSet, net::IpAddr, thread};
-use tokio::{net::TcpStream, time::{Duration, timeout}};
 use tokio::sync::mpsc as tokio_mpsc;
+use tokio::{
+    net::TcpStream,
+    time::{Duration, timeout},
+};
 
 const SERVICE_TYPE: &str = "_antfarm._tcp.local.";
 const LOCALHOST_PROBE_TIMEOUT: Duration = Duration::from_millis(150);

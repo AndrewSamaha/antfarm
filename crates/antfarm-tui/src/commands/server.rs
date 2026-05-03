@@ -1,6 +1,6 @@
 use crate::{app::App, commands::parse_config_value, network::send_message};
-use anyhow::Result;
 use antfarm_core::ClientMessage;
+use anyhow::Result;
 
 pub(super) async fn submit_server_command(
     trimmed: &str,
@@ -166,10 +166,7 @@ pub(super) async fn submit_server_command(
     }
 
     if head == "/sc" && verb == "kill" {
-        let selector = trimmed
-            .strip_prefix("/sc kill ")
-            .unwrap_or_default()
-            .trim();
+        let selector = trimmed.strip_prefix("/sc kill ").unwrap_or_default().trim();
         if selector.is_empty() {
             app.set_error("expected: /sc kill <selector>");
             return Ok(());
@@ -199,10 +196,16 @@ pub(super) async fn submit_server_command(
                 let y = y_raw
                     .parse::<i32>()
                     .map_err(|_| anyhow::anyhow!("dig y must be an integer"))?;
-                (Some(antfarm_core::Position { x, y }), *width_raw, *height_raw)
+                (
+                    Some(antfarm_core::Position { x, y }),
+                    *width_raw,
+                    *height_raw,
+                )
             }
             _ => {
-                app.set_error("expected: /sc dig <width> <height> or /sc dig <x> <y> <width> <height>");
+                app.set_error(
+                    "expected: /sc dig <width> <height> or /sc dig <x> <y> <width> <height>",
+                );
                 return Ok(());
             }
         };
@@ -212,7 +215,15 @@ pub(super) async fn submit_server_command(
         let height = height_raw
             .parse::<u16>()
             .map_err(|_| anyhow::anyhow!("dig height must be an unsigned integer"))?;
-        send_message(writer, ClientMessage::DigArea { center, width, height }).await?;
+        send_message(
+            writer,
+            ClientMessage::DigArea {
+                center,
+                width,
+                height,
+            },
+        )
+        .await?;
         app.clear_status();
         return Ok(());
     }
@@ -222,6 +233,28 @@ pub(super) async fn submit_server_command(
         let _ = args.next();
         let _ = args.next();
         let remaining = args.collect::<Vec<_>>();
+        if let [resource, x_raw, y_raw] = remaining.as_slice()
+            && matches!(*resource, "q" | "queen")
+        {
+            let x = x_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow::anyhow!("put queen x must be an integer"))?;
+            let y = y_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow::anyhow!("put queen y must be an integer"))?;
+            send_message(
+                writer,
+                ClientMessage::PutArea {
+                    resource: resource.to_string(),
+                    center: Some(antfarm_core::Position { x, y }),
+                    width: 1,
+                    height: 1,
+                },
+            )
+            .await?;
+            app.clear_status();
+            return Ok(());
+        }
         let (resource, center, width_raw, height_raw) = match remaining.as_slice() {
             [resource, width_raw, height_raw] => {
                 (resource.to_string(), None, *width_raw, *height_raw)
@@ -241,7 +274,7 @@ pub(super) async fn submit_server_command(
                 )
             }
             _ => {
-                app.set_error("expected: /sc put <resource> <width> <height> or /sc put <resource> <x> <y> <width> <height>");
+                app.set_error("expected: /sc put queen <x> <y>, /sc put <resource> <width> <height>, or /sc put <resource> <x> <y> <width> <height>");
                 return Ok(());
             }
         };
@@ -290,7 +323,7 @@ pub(super) async fn submit_server_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc feed_queen <amount>, /sc set queen.eggs <n>, /sc kill <selector>, /sc dig <width> <height>, /sc dig <x> <y> <width> <height>, /sc put <resource> <width> <height>, /sc put <resource> <x> <y> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc feed_queen <amount>, /sc set queen.eggs <n>, /sc kill <selector>, /sc dig <width> <height>, /sc dig <x> <y> <width> <height>, /sc put queen <x> <y>, /sc put <resource> <width> <height>, /sc put <resource> <x> <y> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
         return Ok(());
     }
 

@@ -56,7 +56,15 @@ pub fn generate_world(seed: u64, width: i32, config: &serde_json::Value) -> Worl
         seed ^ 0xA5_0E,
         chunk_width,
         Tile::Resource,
-        &DepositConfig::from_config(config, "world.gen_params.ore", 2, 6, 18, 20, max_depth.abs() - 8),
+        &DepositConfig::from_config(
+            config,
+            "world.gen_params.ore",
+            2,
+            6,
+            18,
+            20,
+            max_depth.abs() - 8,
+        ),
         &[Tile::Stone],
         &surface_heights,
     );
@@ -199,7 +207,16 @@ fn apply_cluster_pass(
             };
             let cluster_max = deposit.cluster_max.max(deposit.cluster_min);
             let target_size = rng.random_range(deposit.cluster_min..=cluster_max);
-            grow_cluster(world, &mut rng, center, target_size, tile, replaceable, min_y, max_y);
+            grow_cluster(
+                world,
+                &mut rng,
+                center,
+                target_size,
+                tile,
+                replaceable,
+                min_y,
+                max_y,
+            );
         }
     }
 }
@@ -253,7 +270,8 @@ fn apply_depth_scaled_cluster_pass(
             let cluster_max = deposit.cluster_max.max(deposit.cluster_min);
             let scaled_max = deposit.cluster_min
                 + ((cluster_max - deposit.cluster_min) as f64 * depth_factor).round() as i32;
-            let target_size = rng.random_range(deposit.cluster_min..=scaled_max.max(deposit.cluster_min));
+            let target_size =
+                rng.random_range(deposit.cluster_min..=scaled_max.max(deposit.cluster_min));
             grow_cluster(
                 world,
                 &mut rng,

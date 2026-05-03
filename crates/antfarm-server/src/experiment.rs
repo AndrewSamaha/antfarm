@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
 use antfarm_core::{
     DAY_TICKS, GameState, NpcKind, ReplayArtifact, Snapshot, TICK_MILLIS, merge_config,
     set_config_path,
 };
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -257,7 +257,10 @@ pub(crate) fn maybe_create_run_context(
     }
 
     let run_dir = if let Some(condition_name) = condition_name {
-        experiment_dir.join(condition_name).join("runs").join(run_name()?)
+        experiment_dir
+            .join(condition_name)
+            .join("runs")
+            .join(run_name()?)
     } else {
         experiment_dir.join("runs").join(run_name()?)
     };
@@ -352,16 +355,10 @@ fn expand_conditions(file: &ServerConfigFile) -> Result<Vec<ExpandedCondition>> 
         match &condition.parameter {
             Some(parameter) => {
                 if parameter.path.trim().is_empty() {
-                    anyhow::bail!(
-                        "condition {} has an empty parameter path",
-                        condition.name
-                    );
+                    anyhow::bail!("condition {} has an empty parameter path", condition.name);
                 }
                 if parameter.values.is_empty() {
-                    anyhow::bail!(
-                        "condition {} has no parameter values",
-                        condition.name
-                    );
+                    anyhow::bail!("condition {} has no parameter values", condition.name);
                 }
                 let parameter_key = parameter_key_segment(&parameter.path);
                 for value in &parameter.values {
@@ -415,7 +412,10 @@ fn parameter_value_label(value: &Value) -> String {
         .collect()
 }
 
-pub(crate) fn stop_reason(stop_conditions: &StopConditionExpr, game: &GameState) -> Option<StopReason> {
+pub(crate) fn stop_reason(
+    stop_conditions: &StopConditionExpr,
+    game: &GameState,
+) -> Option<StopReason> {
     match stop_conditions {
         StopConditionExpr::And { and } => {
             if and.is_empty() {
@@ -492,7 +492,12 @@ pub(crate) fn write_run_result(
         context.run_dir.join("result.json"),
         serde_json::to_vec_pretty(&summary)?,
     )
-    .with_context(|| format!("write experiment result {}", context.run_dir.join("result.json").display()))?;
+    .with_context(|| {
+        format!(
+            "write experiment result {}",
+            context.run_dir.join("result.json").display()
+        )
+    })?;
     emit_log(
         "experiment_run_finished",
         json!({
@@ -583,7 +588,12 @@ fn write_run_manifest(context: &ExperimentRunContext) -> Result<()> {
         context.run_dir.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )
-    .with_context(|| format!("write run manifest {}", context.run_dir.join("manifest.json").display()))?;
+    .with_context(|| {
+        format!(
+            "write run manifest {}",
+            context.run_dir.join("manifest.json").display()
+        )
+    })?;
     Ok(())
 }
 
@@ -599,6 +609,42 @@ fn merge_startup(base: &StartupConfig, override_config: &StartupOverride) -> Sta
             .sc_commands
             .clone()
             .unwrap_or_else(|| base.sc_commands.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerConfigFile;
+
+    #[test]
+    fn server_yaml_supports_nested_colony_roles() {
+        let raw = r#"
+config:
+  colony:
+    roles:
+      food_gatherer:
+        weight: 5
+      hive_maintenance:
+        queen_chamber:
+          weight: 2
+"#;
+
+        let parsed: ServerConfigFile = serde_yaml::from_str(raw).expect("parse yaml server config");
+
+        assert_eq!(
+            parsed
+                .config
+                .pointer("/colony/roles/food_gatherer/weight")
+                .and_then(serde_json::Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            parsed
+                .config
+                .pointer("/colony/roles/hive_maintenance/queen_chamber/weight")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
     }
 }
 
@@ -651,20 +697,28 @@ fn run_post_run_analysis(context: &ExperimentRunContext) -> Result<()> {
         }),
     );
     let started = Instant::now();
-    let output = command
-        .output()
-        .with_context(|| format!("run experiment analysis hook for {}", context.run_dir.display()))?;
+    let output = command.output().with_context(|| {
+        format!(
+            "run experiment analysis hook for {}",
+            context.run_dir.display()
+        )
+    })?;
 
-    fs::write(analysis_dir.join("stdout.log"), &output.stdout)
-        .with_context(|| format!("write analysis stdout {}", analysis_dir.join("stdout.log").display()))?;
-    fs::write(analysis_dir.join("stderr.log"), &output.stderr)
-        .with_context(|| format!("write analysis stderr {}", analysis_dir.join("stderr.log").display()))?;
+    fs::write(analysis_dir.join("stdout.log"), &output.stdout).with_context(|| {
+        format!(
+            "write analysis stdout {}",
+            analysis_dir.join("stdout.log").display()
+        )
+    })?;
+    fs::write(analysis_dir.join("stderr.log"), &output.stderr).with_context(|| {
+        format!(
+            "write analysis stderr {}",
+            analysis_dir.join("stderr.log").display()
+        )
+    })?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "analysis hook exited with status {}",
-            output.status
-        );
+        anyhow::bail!("analysis hook exited with status {}", output.status);
     }
     emit_log(
         "experiment_analysis_finished",
@@ -726,13 +780,24 @@ fn run_experiment_aggregation(context: &ExperimentRunContext) -> Result<()> {
             .arg("--experiment-dir")
             .arg(&target_dir)
             .output()
-            .with_context(|| format!("run experiment aggregation hook for {}", target_dir.display()))?;
+            .with_context(|| {
+                format!(
+                    "run experiment aggregation hook for {}",
+                    target_dir.display()
+                )
+            })?;
 
         let suffix = scope;
-        fs::write(analysis_dir.join(format!("aggregation_{suffix}_stdout.log")), &output.stdout)
-            .with_context(|| format!("write aggregation stdout for {}", target_dir.display()))?;
-        fs::write(analysis_dir.join(format!("aggregation_{suffix}_stderr.log")), &output.stderr)
-            .with_context(|| format!("write aggregation stderr for {}", target_dir.display()))?;
+        fs::write(
+            analysis_dir.join(format!("aggregation_{suffix}_stdout.log")),
+            &output.stdout,
+        )
+        .with_context(|| format!("write aggregation stdout for {}", target_dir.display()))?;
+        fs::write(
+            analysis_dir.join(format!("aggregation_{suffix}_stderr.log")),
+            &output.stderr,
+        )
+        .with_context(|| format!("write aggregation stderr for {}", target_dir.display()))?;
 
         if !output.status.success() {
             anyhow::bail!("aggregation hook exited with status {}", output.status);
@@ -792,12 +857,33 @@ fn run_experiment_visualizations(context: &ExperimentRunContext) -> Result<()> {
         .arg("--run-dir")
         .arg(&context.run_dir)
         .output()
-        .with_context(|| format!("run experiment visualization hook for {}", experiment_dir.display()))?;
+        .with_context(|| {
+            format!(
+                "run experiment visualization hook for {}",
+                experiment_dir.display()
+            )
+        })?;
 
-    fs::write(analysis_dir.join("visualization_stdout.log"), &output.stdout)
-        .with_context(|| format!("write visualization stdout for {}", experiment_dir.display()))?;
-    fs::write(analysis_dir.join("visualization_stderr.log"), &output.stderr)
-        .with_context(|| format!("write visualization stderr for {}", experiment_dir.display()))?;
+    fs::write(
+        analysis_dir.join("visualization_stdout.log"),
+        &output.stdout,
+    )
+    .with_context(|| {
+        format!(
+            "write visualization stdout for {}",
+            experiment_dir.display()
+        )
+    })?;
+    fs::write(
+        analysis_dir.join("visualization_stderr.log"),
+        &output.stderr,
+    )
+    .with_context(|| {
+        format!(
+            "write visualization stderr for {}",
+            experiment_dir.display()
+        )
+    })?;
 
     if !output.status.success() {
         anyhow::bail!("visualization hook exited with status {}", output.status);
@@ -816,12 +902,20 @@ fn run_experiment_visualizations(context: &ExperimentRunContext) -> Result<()> {
     Ok(())
 }
 
-fn write_analysis_error(context: &ExperimentRunContext, filename: &str, message: &str) -> Result<()> {
+fn write_analysis_error(
+    context: &ExperimentRunContext,
+    filename: &str,
+    message: &str,
+) -> Result<()> {
     let analysis_dir = context.run_dir.join("analysis");
     fs::create_dir_all(&analysis_dir)
         .with_context(|| format!("create run analysis dir {}", analysis_dir.display()))?;
-    fs::write(analysis_dir.join(filename), message)
-        .with_context(|| format!("write analysis error {}", analysis_dir.join(filename).display()))?;
+    fs::write(analysis_dir.join(filename), message).with_context(|| {
+        format!(
+            "write analysis error {}",
+            analysis_dir.join(filename).display()
+        )
+    })?;
     Ok(())
 }
 
@@ -830,12 +924,10 @@ pub(crate) fn debug_log_path(context: &ExperimentRunContext) -> PathBuf {
 }
 
 pub(crate) fn datetime_seed() -> Result<u64> {
-    Ok(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock before unix epoch")?
-            .as_millis() as u64,
-    )
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_millis() as u64)
 }
 
 fn stop_reason_for_predicate(spec: &StopPredicateSpec, game: &GameState) -> Option<StopReason> {
@@ -850,14 +942,10 @@ fn stop_reason_for_predicate(spec: &StopPredicateSpec, game: &GameState) -> Opti
             return Some(StopReason::MaxDay(max_day));
         }
     }
-    if spec.all_workers_dead
-        && !game.npcs.iter().any(|npc| npc.kind == NpcKind::Worker)
-    {
+    if spec.all_workers_dead && !game.npcs.iter().any(|npc| npc.kind == NpcKind::Worker) {
         return Some(StopReason::AllWorkersDead);
     }
-    if spec.no_eggs
-        && !game.npcs.iter().any(|npc| npc.kind == NpcKind::Egg)
-    {
+    if spec.no_eggs && !game.npcs.iter().any(|npc| npc.kind == NpcKind::Egg) {
         return Some(StopReason::NoEggs);
     }
     None

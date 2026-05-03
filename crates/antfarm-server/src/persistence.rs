@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, anyhow};
 use antfarm_core::{GameState, Player, Snapshot, default_server_config, merge_config};
+use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
@@ -9,10 +9,7 @@ use std::{
     thread,
 };
 
-use crate::{
-    logging::emit_log,
-    server_state::PersistMessage,
-};
+use crate::{logging::emit_log, server_state::PersistMessage};
 
 pub(crate) const SNAPSHOT_RETENTION: i64 = 10;
 
@@ -135,7 +132,8 @@ pub(crate) fn list_named_gamestates(path: &Path) -> Result<Vec<NamedGameStateInf
             tick: row.get::<_, i64>(3)? as u64,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub(crate) fn load_named_gamestate(path: &Path, selector: &str) -> Result<Option<Snapshot>> {
@@ -182,10 +180,7 @@ pub(crate) fn reset_world_state_preserve_gamestates(path: &Path) -> Result<()> {
 pub(crate) fn delete_named_gamestate(path: &Path, selector: &str) -> Result<usize> {
     let connection = open_db(path)?;
     let deleted = if let Ok(id) = selector.parse::<i64>() {
-        connection.execute(
-            "DELETE FROM named_gamestates WHERE id = ?1",
-            params![id],
-        )?
+        connection.execute("DELETE FROM named_gamestates WHERE id = ?1", params![id])?
     } else {
         connection.execute(
             "
@@ -317,4 +312,82 @@ fn prune_snapshots(connection: &Connection) -> Result<()> {
         params![SNAPSHOT_RETENTION],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_startup_game, save_named_gamestate};
+    use antfarm_core::{GameState, set_config_path};
+    use serde_json::json;
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn startup_config_overrides_gamestate_role_weights() {
+        let mut saved_config = json!({
+            "colony": {
+                "ambient_worker_count": 0
+            }
+        });
+        set_config_path(
+            &mut saved_config,
+            "colony.roles.food_gatherer.weight",
+            json!(9),
+        )
+        .expect("set saved role weight");
+        let saved_game = GameState::from_config(saved_config);
+
+        let db_path = unique_test_db_path("startup_role_override");
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).expect("create test db dir");
+        }
+        save_named_gamestate(&db_path, "role-test", &saved_game.snapshot())
+            .expect("save named gamestate");
+
+        let mut override_config = json!({});
+        set_config_path(
+            &mut override_config,
+            "colony.roles.food_gatherer.weight",
+            json!(3),
+        )
+        .expect("set override role weight");
+        set_config_path(
+            &mut override_config,
+            "colony.roles.hive_maintenance.queen_chamber.weight",
+            json!(1),
+        )
+        .expect("set override queen chamber weight");
+
+        let (loaded_game, restored) =
+            load_startup_game(&db_path, false, Some("role-test"), &override_config)
+                .expect("load startup game from named gamestate");
+
+        assert!(restored);
+        assert_eq!(
+            loaded_game
+                .config
+                .pointer("/colony/roles/food_gatherer/weight")
+                .and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            loaded_game
+                .config
+                .pointer("/colony/roles/hive_maintenance/queen_chamber/weight")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time after unix epoch")
+            .as_nanos();
+        env::temp_dir().join(format!("antfarm_{prefix}_{nanos}.sqlite"))
+    }
 }

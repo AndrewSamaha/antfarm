@@ -9,25 +9,22 @@ mod server_state;
 mod startup_commands;
 mod sync;
 
-use anyhow::{Context, Result};
 use antfarm_core::{ReplayArtifact, config_string, config_u16, set_config_path};
+use anyhow::{Context, Result};
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    env,
-    fs,
-    path::PathBuf,
-    sync::Arc,
+use std::{collections::HashMap, env, fs, path::PathBuf, sync::Arc};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, Notify},
 };
-use tokio::{net::TcpListener, sync::{Mutex, Notify}};
 
 use crate::{
     client_session::{SNAPSHOT_DB_PATH, handle_client},
-    discovery::start_mdns_registration,
     debug_npc::start_npc_debug_session_at_path,
+    discovery::start_mdns_registration,
     experiment::{
-        condition_plan, datetime_seed, debug_log_path, load_server_config, maybe_create_run_context,
-        persist_run_manifest, resolve_server_config,
+        condition_plan, datetime_seed, debug_log_path, load_server_config,
+        maybe_create_run_context, persist_run_manifest, resolve_server_config,
     },
     logging::{emit_log, world_log_fields},
     persistence::{
@@ -76,8 +73,7 @@ async fn main() -> Result<()> {
     let start_paused = args.iter().any(|arg| arg == "--paused");
     let list_gamestates = args.iter().any(|arg| arg == "--list-gamestates");
     let list_condition_plan = args.iter().any(|arg| arg == "--list-condition-plan");
-    let print_visualizations_json =
-        args.iter().any(|arg| arg == "--print-visualizations-json");
+    let print_visualizations_json = args.iter().any(|arg| arg == "--print-visualizations-json");
     let delete_all_gamestates = args.iter().any(|arg| arg == "--delete-all-gamestates");
     let mut server_config_path = None;
     let mut condition = None;
@@ -102,16 +98,16 @@ async fn main() -> Result<()> {
                 index += 1;
             }
             "--load-gamestate" => {
-                let selector = args
-                    .get(index + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--load-gamestate requires an id or exact label"))?;
+                let selector = args.get(index + 1).ok_or_else(|| {
+                    anyhow::anyhow!("--load-gamestate requires an id or exact label")
+                })?;
                 load_gamestate = Some(selector.clone());
                 index += 1;
             }
             "--delete-gamestate" => {
-                let selector = args
-                    .get(index + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--delete-gamestate requires an id or exact label"))?;
+                let selector = args.get(index + 1).ok_or_else(|| {
+                    anyhow::anyhow!("--delete-gamestate requires an id or exact label")
+                })?;
                 delete_gamestate = Some(selector.clone());
                 index += 1;
             }
@@ -132,11 +128,7 @@ async fn main() -> Result<()> {
     let loaded_server_config = load_server_config(server_config_path.as_deref())?;
     if list_condition_plan {
         for entry in condition_plan(&loaded_server_config.file)? {
-            println!(
-                "{}\t{}",
-                entry.name.as_deref().unwrap_or("-"),
-                entry.runs
-            );
+            println!("{}\t{}", entry.name.as_deref().unwrap_or("-"), entry.runs);
         }
         return Ok(());
     }
@@ -147,7 +139,8 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let resolved_server_config = resolve_server_config(&loaded_server_config.file, condition.as_deref())?;
+    let resolved_server_config =
+        resolve_server_config(&loaded_server_config.file, condition.as_deref())?;
     let start_paused = start_paused || resolved_server_config.startup.paused;
     let reset_world = reset_world || resolved_server_config.startup.reset_world;
     let load_gamestate = load_gamestate.or(resolved_server_config.startup.load_gamestate.clone());
@@ -159,14 +152,16 @@ async fn main() -> Result<()> {
     let server_port = config_u16(&resolved_server_config.config, "network.port", 14461);
     let server_addr = format!("{server_bind_host}:{server_port}");
     let snapshot_path = PathBuf::from(SNAPSHOT_DB_PATH);
-    let mut experiment_context =
-        maybe_create_run_context(
-            loaded_server_config.path.as_deref(),
-            &resolved_server_config.experiment,
-            resolved_server_config.condition_name.as_deref(),
-        )?;
+    let mut experiment_context = maybe_create_run_context(
+        loaded_server_config.path.as_deref(),
+        &resolved_server_config.experiment,
+        resolved_server_config.condition_name.as_deref(),
+    )?;
     let mut startup_config_override = resolved_server_config.config.clone();
-    if resolved_server_config.experiment.randomize_seed_from_datetime {
+    if resolved_server_config
+        .experiment
+        .randomize_seed_from_datetime
+    {
         let seed = datetime_seed()?;
         set_config_path(&mut startup_config_override, "world.seed", json!(seed))
             .map_err(anyhow::Error::msg)?;
@@ -224,13 +219,12 @@ async fn main() -> Result<()> {
         );
     }
     let persistence_tx = spawn_persistence_worker(snapshot_path.clone())?;
-    let (initial_game, restored) =
-        load_startup_game(
-            &snapshot_path,
-            start_paused,
-            load_gamestate.as_deref(),
-            &startup_config_override,
-        )?;
+    let (initial_game, restored) = load_startup_game(
+        &snapshot_path,
+        start_paused,
+        load_gamestate.as_deref(),
+        &startup_config_override,
+    )?;
     if let Some(context) = experiment_context.as_mut() {
         context.start_tick = initial_game.tick;
         persist_run_manifest(context)?;
@@ -372,9 +366,7 @@ fn run_replay_artifact(path: PathBuf) -> Result<()> {
         .with_context(|| format!("read replay artifact {}", path.display()))?;
     let artifact = serde_json::from_str::<ReplayArtifact>(&raw)
         .with_context(|| format!("parse replay artifact {}", path.display()))?;
-    let verification = artifact
-        .replay()
-        .context("replay deterministic artifact")?;
+    let verification = artifact.replay().context("replay deterministic artifact")?;
     emit_log(
         "replay_finished",
         json!({

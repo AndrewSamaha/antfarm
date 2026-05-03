@@ -42,6 +42,7 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Space f h/j/k/l: place food"),
         Line::from("Space q, then h/j/k/l: preview and place queen"),
         Line::from("Tab: toggle NPC health/food bars"),
+        Line::from("r: toggle worker role labels"),
         Line::from(pause_line),
         Line::from("o: cycle pheromone overlay (home/food/off)"),
         Line::from("/help"),
@@ -103,7 +104,11 @@ pub(crate) fn draw_sync_modal(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from("Searching for LAN servers..."));
             } else {
                 for (index, server) in app.discovered_servers.iter().enumerate() {
-                    let marker = if index == app.selected_server_index { ">" } else { " " };
+                    let marker = if index == app.selected_server_index {
+                        ">"
+                    } else {
+                        " "
+                    };
                     let source = match server.source {
                         DiscoverySource::Localhost => "localhost",
                         DiscoverySource::Mdns => "mDNS",
@@ -196,7 +201,11 @@ pub(crate) fn draw_params_modal(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Clear, area);
     let modal = Paragraph::new(lines)
-        .block(Block::default().title("Server Params").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Server Params")
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: false })
         .scroll((app.params_scroll, 0));
     frame.render_widget(modal, area);

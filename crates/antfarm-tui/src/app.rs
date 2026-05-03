@@ -1,10 +1,9 @@
+use crate::discovery::DiscoveredServer;
 use antfarm_core::{
     AsciiArtAsset, FullSyncChunk, FullSyncComplete, FullSyncStart, MoveDir, PatchFrame,
     PheromoneChannel, PheromoneMap, PlaceMaterial, Player, Position, ServerMessage, Snapshot,
-    World, find_ascii_art_asset,
-    default_server_config,
+    World, default_server_config, find_ascii_art_asset,
 };
-use crate::discovery::DiscoveredServer;
 use std::{
     collections::HashMap,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -24,6 +23,7 @@ pub(crate) struct App {
     pub(crate) params_scroll: u16,
     pub(crate) show_events: bool,
     pub(crate) show_npc_bars: bool,
+    pub(crate) show_ant_roles: bool,
     pub(crate) pheromone_overlay: Option<PheromoneChannel>,
     pub(crate) pheromone_map: Option<PheromoneMap>,
     pub(crate) pending_command: PendingCommand,
@@ -99,6 +99,7 @@ impl App {
             params_scroll: 0,
             show_events: false,
             show_npc_bars: false,
+            show_ant_roles: false,
             pheromone_overlay: None,
             pheromone_map: None,
             pending_command: PendingCommand::None,
@@ -133,6 +134,7 @@ impl App {
             params_scroll: 0,
             show_events: false,
             show_npc_bars: false,
+            show_ant_roles: false,
             pheromone_overlay: None,
             pheromone_map: None,
             pending_command: PendingCommand::None,
@@ -177,7 +179,12 @@ impl App {
         self.player()
             .and_then(|player| player.hive_id)
             .or_else(|| self.snapshot.npcs.iter().find_map(|npc| npc.hive_id))
-            .or_else(|| self.snapshot.placed_art.iter().find_map(|placed| placed.hive_id))
+            .or_else(|| {
+                self.snapshot
+                    .placed_art
+                    .iter()
+                    .find_map(|placed| placed.hive_id)
+            })
     }
 
     pub(crate) fn pan_camera(&mut self, dir: MoveDir) {
@@ -201,7 +208,10 @@ impl App {
 
     pub(crate) fn tick_animation(&mut self) {
         let now = Instant::now();
-        if self.action_animation.is_some_and(|animation| now >= animation.until) {
+        if self
+            .action_animation
+            .is_some_and(|animation| now >= animation.until)
+        {
             self.action_animation = None;
         }
         self.tick_queen_idle_animation(now);
@@ -470,7 +480,9 @@ impl App {
                     if state.frame_index + 1 < animation.frames.len() {
                         state.frame_index += 1;
                         state.frame_until = Some(
-                            now + Duration::from_millis(animation.frames[state.frame_index].duration_ms),
+                            now + Duration::from_millis(
+                                animation.frames[state.frame_index].duration_ms,
+                            ),
                         );
                     } else {
                         state.active_animation = None;

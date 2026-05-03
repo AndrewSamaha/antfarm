@@ -1,0 +1,88 @@
+config:
+  soil:
+    vertical_growth_multiple: 2.0
+  colony:
+    ambient_worker_count: 0
+    search_behavior_profile: baseline
+    worker_lifespan_ticks: 600
+    queen_egg_food_cost: 2
+    max_workers_per_hive: 50
+    minimum_delay_to_hatch: 5
+    roles:
+      food_gatherer:
+        weight: 0
+      hive_maintenance:
+        queen_chamber:
+          radius: 20
+          weight: 1
+
+  queen:
+    egg_laying_cooldown_ticks: 10
+    egg_hatch_cooldown_ticks: 50
+  world:
+    seed: 7
+    max_depth: -255
+    snapshot_interval: 5.0
+    gen_params:
+      chunk_width: 16
+      soil:
+        surface_variation: 4
+        dirt_depth: 150
+        dirt_variation: 3
+      ore:
+        attempts_per_chunk: 2
+        cluster_min: 6
+        cluster_max: 18
+        min_depth: 20
+        max_depth: 220
+      food:
+        attempts_per_chunk: 3
+        cluster_min: 6
+        cluster_max: 14
+        min_depth: 0
+        max_depth: 50
+      stone_pockets:
+        attempts_per_chunk: 0.0
+        cluster_min: 1
+        cluster_max: 60
+        min_depth: 0
+        max_depth: 235
+        depth_gain: 0.00002
+
+startup:
+  paused: true
+  reset_world: true
+  load_gamestate:
+  sc_commands:
+    - /sc dig 60 60 30 25
+    - /sc put queen 60 60
+    - /sc set queen.eggs 4
+    - /sc game unpause
+
+experiment:
+  debug_log: true
+  terminate_server_on_completion: true
+  randomize_seed_from_datetime: true
+  tick_millis: 1
+  replay:
+    save: true
+  analysis:
+    metrics:
+      - simulation_length
+      - final_day
+      - final_tick
+      - found_food
+      - delivered_food
+      - delivered_food_per_day
+      - selected_move_count
+      - steps_to_nth_food
+      - steps_to_nth_queen
+  conditions:
+    - name: baseline
+      runs: 1
+  stop_conditions:
+    or:
+      - max_day: 6
+      - and:
+        - all_workers_dead: true
+        - no_eggs: true

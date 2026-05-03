@@ -133,7 +133,11 @@ async fn submit_command(
 ) -> Result<()> {
     let trimmed = command.trim();
     if app.persist_client_files && !trimmed.is_empty() && push_command_history(app, trimmed) {
-        crate::client_files::save_command_history(&app.player_name, &app.command_history, app.max_history)?;
+        crate::client_files::save_command_history(
+            &app.player_name,
+            &app.command_history,
+            app.max_history,
+        )?;
     }
 
     if trimmed == "/help" {
@@ -203,7 +207,11 @@ fn autocomplete_command(input: &mut String) {
 }
 
 fn push_command_history(app: &mut App, command: &str) -> bool {
-    if app.command_history.last().is_some_and(|last| last == command) {
+    if app
+        .command_history
+        .last()
+        .is_some_and(|last| last == command)
+    {
         return false;
     }
     app.command_history.push(command.to_string());

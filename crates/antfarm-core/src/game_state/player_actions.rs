@@ -1,12 +1,14 @@
 use crate::{
     art::find_ascii_art_asset,
     config::config_u16,
-    pheromones::AntBehaviorState,
     constants::SURFACE_Y,
     constants::{MAX_PLAYERS, QUEEN_EGG_FOOD_COST, STONE_DIG_STEPS},
-    inventory::{add_inventory, default_inventory, default_npc_inventory, inventory_count, remove_inventory},
+    inventory::{
+        add_inventory, default_inventory, default_npc_inventory, inventory_count, remove_inventory,
+    },
+    pheromones::AntBehaviorState,
     protocol::{Action, DigProgress, PlaceMaterial, PlacedArt, Snapshot},
-    types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, Tile},
+    types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, QueenChamberGrowthMode, Tile},
 };
 
 use super::GameState;
@@ -117,6 +119,9 @@ impl GameState {
         height: u16,
         actor_label: Option<String>,
     ) -> Result<(), String> {
+        if matches!(resource, "q" | "queen") {
+            return self.put_queen_at(center, actor_label);
+        }
         if width == 0 || height == 0 {
             return Err("put dimensions must be greater than zero".to_string());
         }
@@ -156,6 +161,122 @@ impl GameState {
                 "Server placed {} {} tiles centered at {},{}",
                 placed, resource, center.x, center.y
             ));
+        }
+        Ok(())
+    }
+
+    pub fn put_queen_at(
+        &mut self,
+        center: Position,
+        actor_label: Option<String>,
+    ) -> Result<(), String> {
+        let Some(asset) = find_ascii_art_asset(QUEEN_ART_ID) else {
+            return Err("queen art asset is missing".to_string());
+        };
+        let hive_id = self.next_hive_id;
+        let origin = Position {
+            x: center.x - asset.world_anchor_x(),
+            y: center.y - asset.anchor_y,
+        };
+
+        for row_index in 0..asset.height {
+            for col_index in 0..asset.world_width() as usize {
+                if asset
+                    .glyph_pair_at_world(col_index as i32, row_index as i32)
+                    .is_none()
+                {
+                    continue;
+                }
+                let pos = Position {
+                    x: origin.x + col_index as i32,
+                    y: origin.y + row_index as i32,
+                };
+                if !self.world.in_bounds(pos) {
+                    return Err(format!(
+                        "queen footprint is out of bounds at {},{}",
+                        pos.x, pos.y
+                    ));
+                }
+                if self.world.tile(pos) == Some(Tile::Bedrock) {
+                    return Err(format!(
+                        "cannot place queen through bedrock at {},{}",
+                        pos.x, pos.y
+                    ));
+                }
+                if self.occupied_by_actor(pos) || self.art_occupies_cell(pos) {
+                    return Err(format!(
+                        "queen footprint is occupied at {},{}",
+                        pos.x, pos.y
+                    ));
+                }
+            }
+        }
+
+        for row_index in 0..asset.height {
+            for col_index in 0..asset.world_width() as usize {
+                if asset
+                    .glyph_pair_at_world(col_index as i32, row_index as i32)
+                    .is_none()
+                {
+                    continue;
+                }
+                let pos = Position {
+                    x: origin.x + col_index as i32,
+                    y: origin.y + row_index as i32,
+                };
+                self.set_world_tile(pos, Tile::Empty);
+            }
+        }
+
+        self.placed_art.push(PlacedArt {
+            asset_id: QUEEN_ART_ID.to_string(),
+            pos: origin,
+            hive_id: Some(hive_id),
+        });
+        self.npcs.push(NpcAnt {
+            id: self.next_npc_id,
+            pos: center,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Queen,
+            health: NpcKind::Queen.max_health(),
+            food: 0,
+            hive_id: Some(hive_id),
+            age_ticks: 0,
+            behavior: AntBehaviorState::Idle,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: None,
+            chamber_radius_x: None,
+            chamber_radius_y: None,
+            chamber_anchor: None,
+            chamber_has_left_anchor: false,
+            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+        });
+        self.next_hive_id = self.next_hive_id.saturating_add(1);
+        self.next_npc_id = self.next_npc_id.saturating_add(1);
+        self.npcs_dirty = true;
+        self.placed_art_dirty = true;
+        match actor_label {
+            Some(actor_label) => self.push_event(format!(
+                "{} placed the queen at {},{}",
+                actor_label, center.x, center.y
+            )),
+            None => self.push_event(format!(
+                "Server placed the queen at {},{}",
+                center.x, center.y
+            )),
         }
         Ok(())
     }
@@ -284,7 +405,10 @@ impl GameState {
             if npc.kind != NpcKind::Queen {
                 continue;
             }
-            npc.food = npc.food.saturating_add(amount).min(NpcKind::Queen.max_food());
+            npc.food = npc
+                .food
+                .saturating_add(amount)
+                .min(NpcKind::Queen.max_food());
             fed += 1;
         }
 
@@ -304,7 +428,9 @@ impl GameState {
             QUEEN_EGG_FOOD_COST,
         );
 
-        let target_food = egg_food_cost.saturating_mul(eggs).min(NpcKind::Queen.max_food());
+        let target_food = egg_food_cost
+            .saturating_mul(eggs)
+            .min(NpcKind::Queen.max_food());
 
         let mut updated = 0usize;
         for npc in &mut self.npcs {
@@ -646,6 +772,12 @@ impl GameState {
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
+            role: None,
+            chamber_radius_x: None,
+            chamber_radius_y: None,
+            chamber_anchor: None,
+            chamber_has_left_anchor: false,
+            chamber_growth_mode: QueenChamberGrowthMode::Outward,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;

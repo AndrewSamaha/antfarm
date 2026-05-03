@@ -146,7 +146,10 @@ fn compile_idle_animation(
     bounds: CropBounds,
 ) -> Result<CompiledIdleAnimation> {
     if source.frames.is_empty() {
-        bail!("idle animation {} must have at least one frame", source.name);
+        bail!(
+            "idle animation {} must have at least one frame",
+            source.name
+        );
     }
 
     let frames = source
@@ -190,17 +193,20 @@ fn parse_transparent(value: &str) -> Result<char> {
 
 fn crop_ascii(source: &str, transparent: char) -> Result<(Vec<String>, CropBounds)> {
     let mut lines: Vec<&str> = source.lines().collect();
-    while lines.first().is_some_and(|line| line.chars().all(|ch| ch == transparent)) {
+    while lines
+        .first()
+        .is_some_and(|line| line.chars().all(|ch| ch == transparent))
+    {
         lines.remove(0);
     }
-    while lines.last().is_some_and(|line| line.chars().all(|ch| ch == transparent)) {
+    while lines
+        .last()
+        .is_some_and(|line| line.chars().all(|ch| ch == transparent))
+    {
         lines.pop();
     }
     if lines.is_empty() {
-        return Ok((
-            Vec::new(),
-            CropBounds { left: 0, right: 0 },
-        ));
+        return Ok((Vec::new(), CropBounds { left: 0, right: 0 }));
     }
 
     let max_width = lines.iter().map(|line| line.len()).max().unwrap_or(0);
@@ -227,10 +233,7 @@ fn crop_ascii(source: &str, transparent: char) -> Result<(Vec<String>, CropBound
     }
 
     if left > right {
-        return Ok((
-            Vec::new(),
-            CropBounds { left: 0, right: 0 },
-        ));
+        return Ok((Vec::new(), CropBounds { left: 0, right: 0 }));
     }
 
     let mut cropped = Vec::with_capacity(normalized.len());
@@ -247,10 +250,16 @@ fn crop_ascii_with_bounds(
     bounds: CropBounds,
 ) -> Result<Vec<String>> {
     let mut lines: Vec<&str> = source.lines().collect();
-    while lines.first().is_some_and(|line| line.chars().all(|ch| ch == transparent)) {
+    while lines
+        .first()
+        .is_some_and(|line| line.chars().all(|ch| ch == transparent))
+    {
         lines.remove(0);
     }
-    while lines.last().is_some_and(|line| line.chars().all(|ch| ch == transparent)) {
+    while lines
+        .last()
+        .is_some_and(|line| line.chars().all(|ch| ch == transparent))
+    {
         lines.pop();
     }
     if lines.is_empty() {
@@ -312,7 +321,12 @@ fn emit_module(assets: &[CompiledAsset]) -> String {
             out.push_str("                frames: &[\n");
             for frame in &animation.frames {
                 out.push_str("                    AsciiArtIdleAnimationFrame {\n");
-                writeln!(&mut out, "                        duration_ms: {},", frame.duration_ms).unwrap();
+                writeln!(
+                    &mut out,
+                    "                        duration_ms: {},",
+                    frame.duration_ms
+                )
+                .unwrap();
                 out.push_str("                        rows: &[\n");
                 for row in &frame.rows {
                     writeln!(&mut out, "                            {:?},", row).unwrap();

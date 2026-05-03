@@ -2,9 +2,8 @@ use serde_json::{Map, Value, json};
 
 use crate::constants::{
     DEFAULT_PLANT_GROWTH_FREQUENCY, DEFAULT_SOIL_SETTLE_FREQUENCY,
-    DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE, DEFAULT_WORLD_MAX_DEPTH,
-    DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, DEFAULT_WORLD_SEED, EGG_HATCH_TICKS,
-    NPC_WORKER_LIFESPAN_TICKS, QUEEN_EGG_FOOD_COST,
+    DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE, DEFAULT_WORLD_MAX_DEPTH, DEFAULT_WORLD_SEED,
+    DEFAULT_WORLD_SNAPSHOT_INTERVAL_SECONDS, EGG_HATCH_TICKS, QUEEN_EGG_FOOD_COST,
 };
 
 pub fn default_server_config() -> Value {
@@ -32,7 +31,20 @@ fn default_config() -> Value {
             "ambient_worker_count": 2,
             "search_behavior_profile": "baseline",
             "food_carry_max": 1,
-            "worker_lifespan_ticks": NPC_WORKER_LIFESPAN_TICKS,
+            "roles": {
+                "food_gatherer": {
+                    "lifespan": 600,
+                    "weight": 3
+                },
+                "hive_maintenance": {
+                    "queen_chamber": {
+                        "lifespan": 2000,
+                        "radius_x": 20,
+                        "radius_y": 15,
+                        "weight": 1
+                    }
+                }
+            },
             "queen_egg_food_cost": QUEEN_EGG_FOOD_COST,
             "minimum_delay_to_hatch": EGG_HATCH_TICKS,
             "queen_delivery_radius": 5,

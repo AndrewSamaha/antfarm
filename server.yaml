@@ -8,7 +8,16 @@ config:
     vertical_growth_multiple: 5.0
   colony:
     ambient_worker_count: 2
-    worker_lifespan_ticks: 600
+    roles:
+      food_gatherer:
+        lifespan: 600
+        weight: 4
+      hive_maintenance:
+        queen_chamber:
+          lifespan: 2000
+          radius_x: 19
+          radius_y: 13
+          weight: 1
     queen_egg_food_cost: 2
     egg_hatch_ticks: 36
     queen_delivery_radius: 5
@@ -43,7 +52,7 @@ config:
         min_depth: 0
         max_depth: 50
       stone_pockets:
-        attempts_per_chunk: 60.0
+        attempts_per_chunk: 2.0
         cluster_min: 1
         cluster_max: 60
         min_depth: 0
@@ -51,10 +60,14 @@ config:
         depth_gain: 0.00002
 
 startup:
-  paused: false
+  paused: true
   reset_world: false
   load_gamestate:
-  sc_commands: []
+  sc_commands:
+    - /sc dig 60 60 25 17
+    - /sc put queen 60 60
+    - /sc set queen.eggs 12
+    - /sc put stone 78 60 2 2
 
 experiment:
   debug_log: false

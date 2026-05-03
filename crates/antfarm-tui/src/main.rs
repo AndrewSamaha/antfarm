@@ -19,8 +19,8 @@ use crate::{
     },
     render::draw,
 };
-use anyhow::Result;
 use antfarm_core::{ClientMessage, GameState, ReplayArtifact, TICK_MILLIS};
+use anyhow::Result;
 use crossterm::{
     event::EventStream,
     execute,

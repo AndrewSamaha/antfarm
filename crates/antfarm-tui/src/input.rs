@@ -3,8 +3,10 @@ use crate::{
     commands::{command_suggestion, handle_command_input},
     network::{send_action, send_message},
 };
+use antfarm_core::{
+    Action, ClientMessage, MoveDir, PheromoneChannel, PlaceMaterial, Position, Tile,
+};
 use anyhow::Result;
-use antfarm_core::{Action, ClientMessage, MoveDir, PheromoneChannel, PlaceMaterial, Position, Tile};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use std::time::{Duration, Instant};
 
@@ -130,6 +132,7 @@ pub(crate) async fn handle_event(
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char('e') => app.show_events = !app.show_events,
         KeyCode::Tab => app.show_npc_bars = !app.show_npc_bars,
+        KeyCode::Char('r') => app.show_ant_roles = !app.show_ant_roles,
         KeyCode::Char('p') => {
             if app.is_replay() && writer.is_none() {
                 app.toggle_local_pause();

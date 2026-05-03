@@ -6,8 +6,8 @@ use crate::{
     debug_npc::{start_npc_debug_session, stop_npc_debug_session},
     logging::{emit_log, world_log_fields},
     persistence::{
-        delete_all_named_gamestates, delete_named_gamestate,
-        load_named_gamestate, save_named_gamestate,
+        delete_all_named_gamestates, delete_named_gamestate, load_named_gamestate,
+        save_named_gamestate,
     },
     server_state::ServerState,
 };
@@ -76,9 +76,7 @@ async fn run_startup_sc_command(
             return Err(anyhow!("no saved game state matched: {selector}"));
         }
         let mut game = state.game.lock().await;
-        game.push_server_event(format!(
-            "Deleted {deleted} saved game state(s): {selector}"
-        ));
+        game.push_server_event(format!("Deleted {deleted} saved game state(s): {selector}"));
         let _ = game.take_patch();
         return Ok(());
     }
@@ -100,7 +98,9 @@ async fn run_startup_sc_command(
             let _ = game.take_patch();
             snapshot
         };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
         return Ok(());
     }
 
@@ -109,7 +109,10 @@ async fn run_startup_sc_command(
         let seed = if raw.is_empty() {
             None
         } else {
-            Some(raw.parse::<u64>().map_err(|_| anyhow!("world_reset seed must be an unsigned integer"))?)
+            Some(
+                raw.parse::<u64>()
+                    .map_err(|_| anyhow!("world_reset seed must be an unsigned integer"))?,
+            )
         };
         let snapshot = {
             let mut game = state.game.lock().await;
@@ -125,7 +128,9 @@ async fn run_startup_sc_command(
             );
             snapshot
         };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
         let _ = state
             .persistence_tx
             .send(crate::server_state::PersistMessage::ClearPlayerProfiles);
@@ -138,7 +143,9 @@ async fn run_startup_sc_command(
         let resource = args.next().unwrap_or_default();
         let amount_raw = args.next().unwrap_or_default();
         if target.is_empty() || resource.is_empty() || amount_raw.is_empty() {
-            return Err(anyhow!("expected: /sc give <player-name|@a|@e> <resource> <amount>"));
+            return Err(anyhow!(
+                "expected: /sc give <player-name|@a|@e> <resource> <amount>"
+            ));
         }
         let amount = amount_raw
             .parse::<u16>()
@@ -151,7 +158,9 @@ async fn run_startup_sc_command(
             let _ = game.take_patch();
             snapshot
         };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
         return Ok(());
     }
 
@@ -201,12 +210,15 @@ async fn run_startup_sc_command(
         let value = parse_config_value(raw_value)?;
         let snapshot = {
             let mut game = state.game.lock().await;
-            game.set_config_value(path, value.clone()).map_err(anyhow::Error::msg)?;
+            game.set_config_value(path, value.clone())
+                .map_err(anyhow::Error::msg)?;
             let snapshot = game.snapshot();
             let _ = game.take_patch();
             snapshot
         };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
         emit_log("startup_sc_set", json!({ "path": path, "value": value }));
         return Ok(());
     }
@@ -218,7 +230,8 @@ async fn run_startup_sc_command(
         }
         let snapshot = {
             let mut game = state.game.lock().await;
-            game.kill_by_selector(selector).map_err(anyhow::Error::msg)?;
+            game.kill_by_selector(selector)
+                .map_err(anyhow::Error::msg)?;
             let snapshot = game.snapshot();
             let _ = game.take_patch();
             snapshot
@@ -261,7 +274,12 @@ async fn run_startup_sc_command(
     }
 
     if trimmed == "/sc debug.npc status" {
-        let active = state.npc_debug.lock().await.as_ref().map(|s| s.path.clone());
+        let active = state
+            .npc_debug
+            .lock()
+            .await
+            .as_ref()
+            .map(|s| s.path.clone());
         let mut game = state.game.lock().await;
         match active {
             Some(path) => game.push_server_event(format!("NPC debug active: {}", path.display())),
@@ -307,12 +325,16 @@ async fn run_startup_sc_command(
                 let y = y_raw
                     .parse::<i32>()
                     .map_err(|_| anyhow!("dig y must be an integer"))?;
-                (Some(antfarm_core::Position { x, y }), *width_raw, *height_raw)
+                (
+                    Some(antfarm_core::Position { x, y }),
+                    *width_raw,
+                    *height_raw,
+                )
             }
             _ => {
                 return Err(anyhow!(
                     "expected: /sc dig <width> <height> or /sc dig <x> <y> <width> <height>"
-                ))
+                ));
             }
         };
         let width = width_raw
@@ -330,21 +352,47 @@ async fn run_startup_sc_command(
                 None => {
                     return Err(anyhow!(
                         "startup dig without explicit x/y is not supported without a live player context"
-                    ))
+                    ));
                 }
             }
             let snapshot = game.snapshot();
             let _ = game.take_patch();
             snapshot
         };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
         return Ok(());
     }
 
     if let Some(raw) = trimmed.strip_prefix("/sc put ") {
         let args = raw.split_whitespace().collect::<Vec<_>>();
+        if let [resource, x_raw, y_raw] = args.as_slice()
+            && matches!(*resource, "q" | "queen")
+        {
+            let x = x_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow!("put queen x must be an integer"))?;
+            let y = y_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow!("put queen y must be an integer"))?;
+            let snapshot = {
+                let mut game = state.game.lock().await;
+                game.put_queen_at(antfarm_core::Position { x, y }, None)
+                    .map_err(anyhow::Error::msg)?;
+                let snapshot = game.snapshot();
+                let _ = game.take_patch();
+                snapshot
+            };
+            let _ = state
+                .persistence_tx
+                .send(crate::server_state::PersistMessage::Save(snapshot));
+            return Ok(());
+        }
         let (resource, center, width_raw, height_raw) = match args.as_slice() {
-            [resource, width_raw, height_raw] => (resource.to_string(), None, *width_raw, *height_raw),
+            [resource, width_raw, height_raw] => {
+                (resource.to_string(), None, *width_raw, *height_raw)
+            }
             [resource, x_raw, y_raw, width_raw, height_raw] => {
                 let x = x_raw
                     .parse::<i32>()
@@ -361,8 +409,8 @@ async fn run_startup_sc_command(
             }
             _ => {
                 return Err(anyhow!(
-                    "expected: /sc put <resource> <width> <height> or /sc put <resource> <x> <y> <width> <height>"
-                ))
+                    "expected: /sc put queen <x> <y>, /sc put <resource> <width> <height>, or /sc put <resource> <x> <y> <width> <height>"
+                ));
             }
         };
         let width = width_raw
@@ -380,14 +428,16 @@ async fn run_startup_sc_command(
                 None => {
                     return Err(anyhow!(
                         "startup put without explicit x/y is not supported without a live player context"
-                    ))
+                    ));
                 }
             }
             let snapshot = game.snapshot();
             let _ = game.take_patch();
             snapshot
         };
-        let _ = state.persistence_tx.send(crate::server_state::PersistMessage::Save(snapshot));
+        let _ = state
+            .persistence_tx
+            .send(crate::server_state::PersistMessage::Save(snapshot));
         return Ok(());
     }
 
@@ -422,7 +472,8 @@ fn parse_config_value(raw: &str) -> Result<Value> {
     if let Ok(value) = raw.parse::<f64>() {
         return Ok(Value::from(value));
     }
-    if ((raw.starts_with('{') && raw.ends_with('}')) || (raw.starts_with('[') && raw.ends_with(']')))
+    if ((raw.starts_with('{') && raw.ends_with('}'))
+        || (raw.starts_with('[') && raw.ends_with(']')))
         && let Ok(value) = serde_json::from_str::<Value>(raw)
     {
         return Ok(value);

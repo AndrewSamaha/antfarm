@@ -29,7 +29,11 @@ pub(crate) fn add_inventory(inventory: &mut HashMap<String, u16>, key: &str, amo
     *entry = entry.saturating_add(amount);
 }
 
-pub(crate) fn remove_inventory(inventory: &mut HashMap<String, u16>, key: &str, amount: u16) -> bool {
+pub(crate) fn remove_inventory(
+    inventory: &mut HashMap<String, u16>,
+    key: &str,
+    amount: u16,
+) -> bool {
     let Some(entry) = inventory.get_mut(key) else {
         return false;
     };

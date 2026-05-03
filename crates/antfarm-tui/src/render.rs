@@ -3,9 +3,8 @@ use crate::{
     modals::{centered_rect, draw_help_modal, draw_params_modal, draw_sync_modal},
 };
 use antfarm_core::{
-    DAY_TICKS, MoveDir, NpcKind, PheromoneChannel, PlaceMaterial, Position, SURFACE_Y, Tile,
-    Viewport,
-    find_ascii_art_asset,
+    DAY_TICKS, DEFAULT_WORKER_ROLE_PATH, MoveDir, NpcKind, PheromoneChannel, PlaceMaterial,
+    Position, SURFACE_Y, Tile, Viewport, find_ascii_art_asset,
 };
 use ratatui::{
     Frame,
@@ -106,6 +105,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         top.push(Span::styled(
             format!("  pheromone={label}"),
             Style::default().fg(Color::LightMagenta),
+        ));
+    }
+
+    if app.show_ant_roles {
+        top.push(Span::styled(
+            "  roles=on",
+            Style::default().fg(Color::LightCyan),
         ));
     }
 
@@ -240,7 +246,7 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
         let color = npc_color(app, npc.hive_id, npc.kind);
         return match npc.kind {
             NpcKind::Worker => Span::styled(
-                "xx",
+                worker_glyph(app, npc.role.as_deref()),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             NpcKind::Egg => Span::styled(
@@ -264,18 +270,31 @@ fn render_cell(app: &App, pos: Position) -> Span<'static> {
     };
     let overlay_bg = pheromone_overlay_bg(app, pos);
     match tile {
-        Tile::Empty if pos.y == SURFACE_Y - 1 => {
-            Span::styled("  ", Style::default().bg(overlay_bg.unwrap_or(Color::Rgb(20, 45, 20))))
-        }
-        Tile::Empty => Span::styled("  ", Style::default().bg(overlay_bg.unwrap_or(Color::Reset))),
+        Tile::Empty if pos.y == SURFACE_Y - 1 => Span::styled(
+            "  ",
+            Style::default().bg(overlay_bg.unwrap_or(Color::Rgb(20, 45, 20))),
+        ),
+        Tile::Empty => Span::styled(
+            "  ",
+            Style::default().bg(overlay_bg.unwrap_or(Color::Reset)),
+        ),
         Tile::Dirt => Span::styled("▓▓", base_tile_style(Color::Gray, overlay_bg)),
         Tile::Stone => Span::styled("██", base_tile_style(Color::White, overlay_bg)),
         Tile::Resource => Span::styled("▒▒", base_tile_style(Color::LightCyan, overlay_bg)),
-        Tile::Food => Span::styled(
-            "&&",
-            base_tile_style(Color::Rgb(0, 128, 0), overlay_bg),
-        ),
+        Tile::Food => Span::styled("&&", base_tile_style(Color::Rgb(0, 128, 0), overlay_bg)),
         Tile::Bedrock => Span::styled("██", base_tile_style(Color::DarkGray, overlay_bg)),
+    }
+}
+
+fn worker_glyph(app: &App, role: Option<&str>) -> &'static str {
+    if !app.show_ant_roles {
+        return "xx";
+    }
+
+    match role.unwrap_or(DEFAULT_WORKER_ROLE_PATH) {
+        DEFAULT_WORKER_ROLE_PATH => "ff",
+        "hive_maintenance.queen_chamber" => "qq",
+        _ => "??",
     }
 }
 

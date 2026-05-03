@@ -60,7 +60,9 @@ pub(crate) fn spawn_background_tasks(state: &ServerState) {
                 };
 
                 if let Some(snapshot) = maybe_snapshot {
-                    let _ = tick_state.persistence_tx.send(PersistMessage::Save(snapshot));
+                    let _ = tick_state
+                        .persistence_tx
+                        .send(PersistMessage::Save(snapshot));
                 }
                 if let Some((reason, snapshot, maybe_patch, terminate_server)) = experiment_stop {
                     if let Some(session) = tick_state.npc_debug.lock().await.take() {
@@ -78,11 +80,16 @@ pub(crate) fn spawn_background_tasks(state: &ServerState) {
                             "tick": snapshot.tick,
                         }),
                     );
-                    let _ = tick_state.persistence_tx.send(PersistMessage::Save(snapshot));
+                    let _ = tick_state
+                        .persistence_tx
+                        .send(PersistMessage::Save(snapshot));
                     if let Some(patch) = maybe_patch
                         && let Err(error) = broadcast_patch(&tick_state, &patch, None).await
                     {
-                        emit_log("patch_broadcast_error", json!({ "error": error.to_string() }));
+                        emit_log(
+                            "patch_broadcast_error",
+                            json!({ "error": error.to_string() }),
+                        );
                     }
                     if terminate_server {
                         tick_state.shutdown_notify.notify_waiters();
@@ -96,7 +103,10 @@ pub(crate) fn spawn_background_tasks(state: &ServerState) {
                 }
                 if let Some(patch) = maybe_patch {
                     if let Err(error) = broadcast_patch(&tick_state, &patch, None).await {
-                        emit_log("patch_broadcast_error", json!({ "error": error.to_string() }));
+                        emit_log(
+                            "patch_broadcast_error",
+                            json!({ "error": error.to_string() }),
+                        );
                     }
                 }
             }

@@ -29,9 +29,7 @@ pub(crate) fn start_mdns_registration(bind_host: &str, port: u16) -> Result<Mdns
     .context("build mDNS service info")?
     .enable_addr_auto();
     let fullname = service.get_fullname().to_string();
-    daemon
-        .register(service)
-        .context("register mDNS service")?;
+    daemon.register(service).context("register mDNS service")?;
     Ok(MdnsRegistration {
         _daemon: daemon,
         fullname,

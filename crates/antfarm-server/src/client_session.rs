@@ -304,6 +304,9 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                 let (maybe_patch, snapshot) = {
                     let mut game = state.game.lock().await;
                     match center {
+                        Some(center) if matches!(resource.as_str(), "q" | "queen") => game
+                            .put_queen_at(center, None)
+                            .map_err(anyhow::Error::msg)?,
                         Some(center) => game
                             .put_area_at(center, &resource, width, height, None)
                             .map_err(anyhow::Error::msg)?,

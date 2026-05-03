@@ -1,7 +1,7 @@
 use crate::{
     inventory::default_npc_inventory,
     pheromones::AntBehaviorState,
-    types::{NpcAnt, NpcKind, Position},
+    types::{DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, Position, QueenChamberGrowthMode},
     world::World,
 };
 
@@ -45,12 +45,22 @@ pub(crate) fn default_npcs_with_count(world: &World, count: u16) -> Vec<NpcAnt> 
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
+            role: Some(DEFAULT_WORKER_ROLE_PATH.to_string()),
+            chamber_radius_x: None,
+            chamber_radius_y: None,
+            chamber_anchor: None,
+            chamber_has_left_anchor: false,
+            chamber_growth_mode: QueenChamberGrowthMode::Outward,
         });
     }
     npcs
 }
 
-pub(crate) fn nearest_open_tile(world: &World, occupied: &[Position], origin: Position) -> Option<Position> {
+pub(crate) fn nearest_open_tile(
+    world: &World,
+    occupied: &[Position],
+    origin: Position,
+) -> Option<Position> {
     for radius in 1_i32..=6_i32 {
         for dy in -radius..=radius {
             for dx in -radius..=radius {

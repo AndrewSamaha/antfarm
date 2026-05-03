@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 use crate::{pheromones::AntBehaviorState, world::World};
 
+pub const DEFAULT_WORKER_ROLE_PATH: &str = "food_gatherer";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Position {
     pub x: i32,
@@ -66,6 +68,13 @@ impl MoveDir {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum QueenChamberGrowthMode {
+    #[default]
+    Outward,
+    Inward,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub id: u8,
@@ -123,6 +132,18 @@ pub struct NpcAnt {
     pub last_egg_laid_tick: Option<u64>,
     #[serde(default)]
     pub last_egg_hatched_tick: Option<u64>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub chamber_radius_x: Option<i32>,
+    #[serde(default)]
+    pub chamber_radius_y: Option<i32>,
+    #[serde(default)]
+    pub chamber_anchor: Option<Position>,
+    #[serde(default)]
+    pub chamber_has_left_anchor: bool,
+    #[serde(default)]
+    pub chamber_growth_mode: QueenChamberGrowthMode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
