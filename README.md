@@ -142,7 +142,7 @@ Experiment definitions live under `experiments/`. The `server.yaml` files stay i
 To pull the current shared experiment state onto your machine:
 
 ```bash
-scripts/sync-experiments-pull.sh
+./antfarm s3 pull
 ```
 
 To run a single condition or a batch:
@@ -157,14 +157,20 @@ Successful experiment runs and visualization generation mark the local `experime
 To push local experiment artifacts back to S3:
 
 ```bash
-scripts/sync-experiments-push.sh
+./antfarm s3 push
+```
+
+To inspect the current local and remote experiment sync state:
+
+```bash
+./antfarm s3 status
 ```
 
 Recommended workflow:
 
-1. `scripts/sync-experiments-pull.sh`
+1. `./antfarm s3 pull`
 2. Commit the code changes that should be associated with the run artifacts.
 3. Run the experiment or regenerate visualizations.
-4. `scripts/sync-experiments-push.sh`
+4. `./antfarm s3 push`
 
-`sync-experiments-push.sh` writes `experiments/.sync_state.json` before upload. That file records the current Git branch, commit id, push time, and the latest discovered run metadata, including the run id and a SHA-256 hash of the run-local `server.yaml`.
+`./antfarm s3 push` writes `experiments/.sync_state.json` before upload. That file records the current Git branch, commit id, push time, and the latest discovered run metadata, including the run id and a SHA-256 hash of the run-local `server.yaml`.

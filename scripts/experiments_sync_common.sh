@@ -37,6 +37,10 @@ git_commit_id() {
   git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown"
 }
 
+git_worktree_is_dirty() {
+  [[ -n "$(git -C "$ROOT_DIR" status --porcelain 2>/dev/null)" ]]
+}
+
 sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -55,6 +59,14 @@ import sys
 path = pathlib.Path(sys.argv[1])
 print(hashlib.sha256(path.read_bytes()).hexdigest())
 PY
+}
+
+fetch_remote_sync_state_to() {
+  local output_path="$1"
+  aws \
+    --cli-connect-timeout 3 \
+    --cli-read-timeout 3 \
+    s3 cp "${EXPERIMENTS_S3_URI}.sync_state.json" "$output_path" >/dev/null 2>&1
 }
 
 latest_run_dir() {
