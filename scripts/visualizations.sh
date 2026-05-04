@@ -63,5 +63,5 @@ uv run --project analysis python -m antfarm_aggregation.cli \
   --experiment-dir "$experiment_dir"
 
 if is_experiment_server_config "$server_config"; then
-  mark_experiments_dirty
+  mark_experiment_dirty "$(experiment_name_from_server_config "$server_config")"
 fi

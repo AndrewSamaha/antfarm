@@ -51,6 +51,6 @@ else
 fi
 if [[ $status -eq 0 && $metadata_only_command -eq 0 && -n "$server_config" ]] \
   && is_experiment_server_config "$server_config"; then
-  mark_experiments_dirty
+  mark_experiment_dirty "$(experiment_name_from_server_config "$server_config")"
 fi
 exit "$status"

@@ -9,102 +9,94 @@ source "$ROOT_DIR/scripts/experiments_sync_common.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  ./antfarm s3 pull [--dryrun] [--delete]
-  ./antfarm s3 push [--dryrun] [--delete]
+  ./antfarm s3 pull <experiment-name> [--dryrun] [--delete]
+  ./antfarm s3 push <experiment-name> [--dryrun] [--delete]
   ./antfarm s3 status
+  ./antfarm s3 ls
 
 Commands:
   pull
-    Sync experiments/ from s3://antfarm/experiments/
+    Sync one experiment from S3 into experiments/<experiment-name>/
 
   push
-    Sync experiments/ to s3://antfarm/experiments/
+    Sync one experiment from experiments/<experiment-name>/ to S3
 
   status
-    Show local dirty state plus local and remote sync-state metadata.
+    Show one-line local status for every local experiment directory.
+
+  ls
+    List remote experiment directories in S3.
 EOF
 }
 
-print_sync_state_details() {
-  local label="$1"
-  local path="$2"
-
-  python3 - "$label" "$path" <<'PY'
+print_sync_state_summary() {
+  local path="$1"
+  python3 - "$path" <<'PY'
 import json
 import pathlib
 import sys
 
-label = sys.argv[1]
-path = pathlib.Path(sys.argv[2])
+path = pathlib.Path(sys.argv[1])
 if not path.exists():
-    print(f"{label}: unavailable")
+    print("-")
     raise SystemExit(0)
 
 data = json.loads(path.read_text())
-print(f"{label}:")
-print(f"  pushed_at: {data.get('pushed_at', 'unknown')}")
-print(f"  branch: {data.get('branch', 'unknown')}")
-print(f"  commit: {data.get('commit', 'unknown')}")
-latest_run = data.get("latest_run")
-if latest_run:
-    condition = latest_run.get("condition")
-    run_label = latest_run.get("run_id", "unknown")
-    if condition:
-        run_label = f"{latest_run.get('experiment', 'unknown')}/{condition}/{run_label}"
-    else:
-        run_label = f"{latest_run.get('experiment', 'unknown')}/{run_label}"
-    print(f"  latest_run: {run_label}")
-    print(f"  server_yaml_sha256: {latest_run.get('server_yaml_sha256', 'unknown')}")
-    seed = latest_run.get("randomized_seed")
-    if seed is not None:
-        print(f"  randomized_seed: {seed}")
-else:
-    print("  latest_run: none")
+latest_run = data.get("latest_run") or {}
+run_id = latest_run.get("run_id") or "-"
+condition = latest_run.get("condition")
+if condition:
+    run_id = f"{condition}/{run_id}"
+commit = data.get("commit", "-")
+print(f"{data.get('pushed_at', '-')}" + "|" + commit[:12] + "|" + run_id)
 PY
 }
 
 print_status() {
   ensure_experiments_dir
 
-  local local_dirty="no"
   local git_dirty="no"
-  if [[ -f "$EXPERIMENTS_UNPUSHED_MARKER" ]]; then
-    local_dirty="yes"
-  fi
   if git_worktree_is_dirty; then
     git_dirty="yes"
   fi
 
   echo "Experiment S3 Status"
-  echo "  experiments_dir: $EXPERIMENTS_DIR"
-  echo "  s3_uri: $EXPERIMENTS_S3_URI"
   echo "  current_branch: $(git_branch_name)"
   echo "  current_commit: $(git_commit_id)"
   echo "  git_worktree_dirty: $git_dirty"
-  echo "  local_unpushed_data: $local_dirty"
+  echo
 
-  print_sync_state_details "local_sync_state" "$EXPERIMENTS_SYNC_STATE_PATH"
+  printf "%-24s  %-5s  %-6s  %-24s  %-12s  %s\n" "experiment" "dirty" "remote" "pushed_at" "commit" "latest_run"
 
-  local remote_tmp
-  remote_tmp="$(mktemp)"
-  trap 'rm -f "$remote_tmp"' RETURN
-  if command -v aws >/dev/null 2>&1 && fetch_remote_sync_state_to "$remote_tmp"; then
-    print_sync_state_details "remote_sync_state" "$remote_tmp"
-    if [[ -f "$EXPERIMENTS_SYNC_STATE_PATH" ]] && cmp -s "$EXPERIMENTS_SYNC_STATE_PATH" "$remote_tmp"; then
-      echo "  sync_state_match: yes"
-    else
-      echo "  sync_state_match: no"
+  local experiment_name
+  while IFS= read -r experiment_name; do
+    [[ -n "$experiment_name" ]] || continue
+
+    local experiment_dir marker_path local_state remote_tmp dirty remote summary
+    experiment_dir="$(experiment_dir_by_name "$experiment_name")"
+    marker_path="$(experiment_unpushed_marker_path "$experiment_name")"
+    local_state="$(experiment_sync_state_path "$experiment_name")"
+    dirty="no"
+    remote="no"
+    if [[ -f "$marker_path" ]]; then
+      dirty="yes"
     fi
-  else
-    echo "remote_sync_state: unavailable"
-    echo "  reason: unable to fetch $EXPERIMENTS_S3_URI.sync_state.json"
-  fi
+    summary="-|-|-"
 
-  if [[ "$local_dirty" == "yes" ]]; then
-    echo "summary: local experiment artifacts have unpushed changes"
-  else
-    echo "summary: no local unpushed marker present"
-  fi
+    if [[ -f "$local_state" ]]; then
+      summary="$(print_sync_state_summary "$local_state")"
+    fi
+
+    remote_tmp="$(mktemp)"
+    if command -v aws >/dev/null 2>&1 && fetch_remote_sync_state_to "$experiment_name" "$remote_tmp"; then
+      remote="yes"
+    fi
+    rm -f "$remote_tmp"
+
+    IFS='|' read -r pushed_at commit latest_run <<<"$summary"
+    printf "%-24s  %-5s  %-6s  %-24s  %-12s  %s\n" \
+      "$experiment_name" "$dirty" "$remote" "$pushed_at" "$commit" "$latest_run"
+  done < <(list_local_experiments)
 }
 
 if [[ $# -lt 1 ]]; then
@@ -129,6 +121,18 @@ case "$subcommand" in
       exit 1
     fi
     print_status
+    ;;
+  ls)
+    if [[ $# -gt 0 ]]; then
+      echo "unexpected arguments for ls: $*" >&2
+      usage
+      exit 1
+    fi
+    if ! command -v aws >/dev/null 2>&1; then
+      echo "aws CLI not found in PATH" >&2
+      exit 1
+    fi
+    list_remote_experiments
     ;;
   -h|--help|help)
     usage

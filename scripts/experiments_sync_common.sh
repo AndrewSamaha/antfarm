@@ -6,16 +6,24 @@ fi
 
 EXPERIMENTS_DIR="$ROOT_DIR/experiments"
 EXPERIMENTS_S3_URI="s3://antfarm/experiments/"
-EXPERIMENTS_UNPUSHED_MARKER="$EXPERIMENTS_DIR/.unpushed_data"
-EXPERIMENTS_SYNC_STATE_PATH="$EXPERIMENTS_DIR/.sync_state.json"
 
 ensure_experiments_dir() {
   mkdir -p "$EXPERIMENTS_DIR"
 }
 
-mark_experiments_dirty() {
-  ensure_experiments_dir
-  : > "$EXPERIMENTS_UNPUSHED_MARKER"
+experiment_dir_by_name() {
+  local experiment_name="$1"
+  echo "$EXPERIMENTS_DIR/$experiment_name"
+}
+
+experiment_unpushed_marker_path() {
+  local experiment_name="$1"
+  echo "$(experiment_dir_by_name "$experiment_name")/.unpushed_data"
+}
+
+experiment_sync_state_path() {
+  local experiment_name="$1"
+  echo "$(experiment_dir_by_name "$experiment_name")/.sync_state.json"
 }
 
 is_experiment_server_config() {
@@ -27,6 +35,25 @@ is_experiment_server_config() {
   local config_dir
   config_dir="$(cd "$(dirname "$server_config_path")" && pwd)"
   [[ "$(basename "$(dirname "$config_dir")")" == "experiments" ]]
+}
+
+experiment_name_from_server_config() {
+  local server_config_path="$1"
+  if ! is_experiment_server_config "$server_config_path"; then
+    return 1
+  fi
+
+  local config_dir
+  config_dir="$(cd "$(dirname "$server_config_path")" && pwd)"
+  basename "$config_dir"
+}
+
+mark_experiment_dirty() {
+  local experiment_name="$1"
+  local experiment_dir
+  experiment_dir="$(experiment_dir_by_name "$experiment_name")"
+  mkdir -p "$experiment_dir"
+  : > "$(experiment_unpushed_marker_path "$experiment_name")"
 }
 
 git_branch_name() {
@@ -62,39 +89,60 @@ PY
 }
 
 fetch_remote_sync_state_to() {
-  local output_path="$1"
+  local experiment_name="$1"
+  local output_path="$2"
   aws \
     --cli-connect-timeout 3 \
     --cli-read-timeout 3 \
-    s3 cp "${EXPERIMENTS_S3_URI}.sync_state.json" "$output_path" >/dev/null 2>&1
+    s3 cp "${EXPERIMENTS_S3_URI}${experiment_name}/.sync_state.json" "$output_path" >/dev/null 2>&1
 }
 
-latest_run_dir() {
+list_local_experiments() {
   ensure_experiments_dir
-  find "$EXPERIMENTS_DIR" -type d -name 'run-*' -print 2>/dev/null | LC_ALL=C sort | tail -n 1
+  find "$EXPERIMENTS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort
 }
 
-write_experiments_sync_state() {
-  ensure_experiments_dir
+list_remote_experiments() {
+  aws \
+    --cli-connect-timeout 3 \
+    --cli-read-timeout 3 \
+    s3 ls "$EXPERIMENTS_S3_URI" 2>/dev/null | awk '/PRE / {print $2}' | sed 's:/$::' | LC_ALL=C sort
+}
 
-  local branch commit pushed_at latest_run run_relative experiment_name condition_name run_id run_dir_json
+latest_run_dir_for_experiment() {
+  local experiment_name="$1"
+  local experiment_dir
+  experiment_dir="$(experiment_dir_by_name "$experiment_name")"
+  if [[ ! -d "$experiment_dir" ]]; then
+    return 0
+  fi
+  find "$experiment_dir" -type d -name 'run-*' -print 2>/dev/null | LC_ALL=C sort | tail -n 1
+}
+
+write_experiment_sync_state() {
+  local experiment_name="$1"
+  local experiment_dir sync_state_path
+  experiment_dir="$(experiment_dir_by_name "$experiment_name")"
+  sync_state_path="$(experiment_sync_state_path "$experiment_name")"
+  mkdir -p "$experiment_dir"
+
+  local branch commit pushed_at latest_run run_relative condition_name run_id run_dir_json
   branch="$(git_branch_name)"
   commit="$(git_commit_id)"
   pushed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  latest_run="$(latest_run_dir)"
+  latest_run="$(latest_run_dir_for_experiment "$experiment_name")"
   run_dir_json="null"
 
   if [[ -n "$latest_run" ]]; then
-    run_relative="${latest_run#"$EXPERIMENTS_DIR"/}"
-    local path_part_1 path_part_2 path_part_3 path_part_4
-    IFS='/' read -r path_part_1 path_part_2 path_part_3 path_part_4 <<<"$run_relative"
-    experiment_name="$path_part_1"
-    if [[ "$path_part_2" == "runs" ]]; then
+    run_relative="${latest_run#"$experiment_dir"/}"
+    local path_part_1 path_part_2 path_part_3
+    IFS='/' read -r path_part_1 path_part_2 path_part_3 <<<"$run_relative"
+    if [[ "$path_part_1" == "runs" ]]; then
       condition_name=""
-      run_id="$path_part_3"
+      run_id="$path_part_2"
     else
-      condition_name="$path_part_2"
-      run_id="$path_part_4"
+      condition_name="$path_part_1"
+      run_id="$path_part_3"
     fi
 
     local run_server_yaml randomized_seed server_yaml_sha256
@@ -120,7 +168,7 @@ print("" if seed is None else seed)
 PY
 )"
 
-    run_dir_json="$(python3 - "$experiment_name" "$condition_name" "$run_id" "experiments/$run_relative" "$server_yaml_sha256" "$randomized_seed" <<'PY'
+    run_dir_json="$(python3 - "$experiment_name" "$condition_name" "$run_id" "experiments/${experiment_name}/$run_relative" "$server_yaml_sha256" "$randomized_seed" <<'PY'
 import json
 import sys
 
@@ -138,7 +186,7 @@ PY
 )"
   fi
 
-  python3 - "$EXPERIMENTS_SYNC_STATE_PATH" "$pushed_at" "$branch" "$commit" "$run_dir_json" <<'PY'
+  python3 - "$sync_state_path" "$pushed_at" "$branch" "$commit" "$run_dir_json" <<'PY'
 import json
 import pathlib
 import sys

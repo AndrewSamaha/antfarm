@@ -139,10 +139,16 @@ The server saves the latest world snapshots to `data/antfarm.sqlite3`, restores 
 
 Experiment definitions live under `experiments/`. The `server.yaml` files stay in Git, while generated run artifacts are synced through S3 at `s3://antfarm/experiments/`.
 
-To pull the current shared experiment state onto your machine:
+To list remote experiments available in S3:
 
 ```bash
-./antfarm s3 pull
+./antfarm s3 ls
+```
+
+To pull one experiment onto your machine:
+
+```bash
+./antfarm s3 pull chamber-ants-1
 ```
 
 To run a single condition or a batch:
@@ -152,15 +158,15 @@ To run a single condition or a batch:
 ./antfarm experiment --server-config ./experiments/experiment-1 --num-runs 10
 ```
 
-Successful experiment runs and visualization generation mark the local `experiments/` tree as having unpushed data by creating `experiments/.unpushed_data`.
+Successful experiment runs and visualization generation mark the specific experiment directory as having unpushed data by creating `experiments/<experiment-name>/.unpushed_data`.
 
-To push local experiment artifacts back to S3:
+To push one experiment back to S3:
 
 ```bash
-./antfarm s3 push
+./antfarm s3 push chamber-ants-1
 ```
 
-To inspect the current local and remote experiment sync state:
+To inspect the current local status for all local experiments:
 
 ```bash
 ./antfarm s3 status
@@ -168,9 +174,9 @@ To inspect the current local and remote experiment sync state:
 
 Recommended workflow:
 
-1. `./antfarm s3 pull`
+1. `./antfarm s3 pull chamber-ants-1`
 2. Commit the code changes that should be associated with the run artifacts.
 3. Run the experiment or regenerate visualizations.
-4. `./antfarm s3 push`
+4. `./antfarm s3 push chamber-ants-1`
 
-`./antfarm s3 push` writes `experiments/.sync_state.json` before upload. That file records the current Git branch, commit id, push time, and the latest discovered run metadata, including the run id and a SHA-256 hash of the run-local `server.yaml`.
+`./antfarm s3 push <experiment-name>` writes `experiments/<experiment-name>/.sync_state.json` before upload. That file records the current Git branch, commit id, push time, and the latest discovered run metadata, including the run id and a SHA-256 hash of the run-local `server.yaml`.

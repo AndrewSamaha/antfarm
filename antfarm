@@ -10,7 +10,7 @@ Usage:
   ./antfarm client [--dev] [--port <port>] [player-name]
   ./antfarm server [server args...]
   ./antfarm experiment --server-config <path> [--num-runs <n>] [server args...]
-  ./antfarm s3 <pull|push|status> [args...]
+  ./antfarm s3 <pull|push|status|ls> [args...]
   ./antfarm visualizations --server-config <path-or-dir>
   ./antfarm replay <replay-artifact-path>
   ./antfarm replay-tui <replay-artifact-path>
@@ -34,7 +34,7 @@ Commands:
     Regenerate an experiment's visualizations and refresh results.html from the current server.yaml.
 
   s3
-    Sync experiment artifacts to or from S3, or inspect the current sync state.
+    Sync experiment artifacts to or from S3, inspect local sync status, or list remote experiments.
 
   replay
     Replay one deterministic replay artifact and verify its final snapshot hash.
@@ -57,9 +57,10 @@ Examples:
   ./antfarm server --server-config ./experiments/experiment-1/server.yaml --condition baseline
   ./antfarm experiment --server-config ./experiments/experiment-1/server.yaml --num-runs 10
   ./antfarm experiment --server-config ./experiments/experiment-1 --num-runs 10
-  ./antfarm s3 pull
-  ./antfarm s3 push
+  ./antfarm s3 pull chamber-ants-1
+  ./antfarm s3 push chamber-ants-1
   ./antfarm s3 status
+  ./antfarm s3 ls
   ./antfarm visualizations --server-config ./experiments/experiment-4
   ./antfarm replay ./.artifacts/tests/replays/headless-determinism/latest/replay.json
   ./antfarm replay-tui ./.artifacts/tests/replays/headless-determinism/latest/replay.json
