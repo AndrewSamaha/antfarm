@@ -99,7 +99,7 @@ fetch_remote_sync_state_to() {
 
 list_local_experiments() {
   ensure_experiments_dir
-  find "$EXPERIMENTS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort
+  find "$EXPERIMENTS_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | LC_ALL=C sort
 }
 
 list_remote_experiments() {
