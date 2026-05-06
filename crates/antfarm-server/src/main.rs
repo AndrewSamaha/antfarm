@@ -118,7 +118,18 @@ async fn main() -> Result<()> {
                 replay_artifact_path = Some(path.clone());
                 index += 1;
             }
-            _ => {}
+            "--reset-world"
+            | "--paused"
+            | "--list-gamestates"
+            | "--list-condition-plan"
+            | "--print-visualizations-json"
+            | "--delete-all-gamestates" => {}
+            value if value.starts_with('-') => {
+                return Err(anyhow::anyhow!("unknown server option: {value}"));
+            }
+            value => {
+                return Err(anyhow::anyhow!("unexpected positional argument: {value}"));
+            }
         }
         index += 1;
     }

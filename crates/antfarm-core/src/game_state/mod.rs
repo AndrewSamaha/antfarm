@@ -424,8 +424,13 @@ impl GameState {
 
 #[cfg(test)]
 mod tests {
-    use super::{GameState, simulation::*};
+    use super::GameState;
     use crate::{
+        ant_roles::{
+            queen_chamber::{
+                queen_chamber_initial_radii_for_mode, random_queen_chamber_growth_mode,
+            },
+        },
         art::find_ascii_art_asset,
         config::set_config_path,
         inventory::default_npc_inventory,

@@ -3,13 +3,14 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const RECENT_POSITION_MEMORY_SIZE: usize = 5;
-const FOOD_GATHERER_ROLE_PATH: &str = DEFAULT_WORKER_ROLE_PATH;
-const QUEEN_CHAMBER_ROLE_PATH: &str = "hive_maintenance.queen_chamber";
-const INITIAL_QUEEN_CHAMBER_RADIUS: i32 = 2;
 const DEFAULT_QUEEN_CHAMBER_RADIUS_X: i32 = 20;
 const DEFAULT_QUEEN_CHAMBER_RADIUS_Y: i32 = 15;
 
 use crate::{
+    ant_roles::{
+        WorkerRoleDefinition, configured_worker_roles, initialize_worker_role,
+        queen_chamber_initial_radii_for_mode, tick_worker,
+    },
     config::{config_f64, config_i32, config_u16, config_u64},
     constants::{
         DEFAULT_PLANT_GROWTH_FREQUENCY, DEFAULT_SOIL_SETTLE_FREQUENCY,
@@ -29,13 +30,6 @@ use crate::{
 
 use super::GameState;
 
-#[derive(Debug, Clone)]
-struct WorkerRoleDefinition {
-    path: String,
-    lifespan_ticks: u16,
-    weight: u16,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchBehaviorProfile {
     Baseline,
@@ -43,29 +37,6 @@ enum SearchBehaviorProfile {
     LocalFieldV1,
     LocalFieldV2,
     OutwardBiasWithLocalFieldV1,
-}
-
-pub(crate) fn random_queen_chamber_growth_mode<R: Rng + ?Sized>(
-    rng: &mut R,
-) -> QueenChamberGrowthMode {
-    if rng.random::<bool>() {
-        QueenChamberGrowthMode::Outward
-    } else {
-        QueenChamberGrowthMode::Inward
-    }
-}
-
-pub(crate) fn queen_chamber_initial_radii_for_mode(
-    mode: QueenChamberGrowthMode,
-    max_x: i32,
-    max_y: i32,
-) -> (i32, i32) {
-    let initial_radius_x = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_x);
-    let initial_radius_y = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_y);
-    match mode {
-        QueenChamberGrowthMode::Outward => (initial_radius_x, initial_radius_y),
-        QueenChamberGrowthMode::Inward => (max_x, max_y),
-    }
 }
 
 impl GameState {
@@ -134,21 +105,17 @@ impl GameState {
         }
         let npc_hive = self.npcs[index].hive_id;
         let queen_pos = npc_hive.and_then(|hive_id| self.find_queen_pos(hive_id));
-        match self.worker_role_path(index) {
-            FOOD_GATHERER_ROLE_PATH => {}
-            QUEEN_CHAMBER_ROLE_PATH => {
-                self.tick_queen_chamber_worker(index, queen_pos, events);
-                return;
-            }
-            _ => {
-                if self.npcs[index].behavior != AntBehaviorState::Idle {
-                    self.npcs[index].behavior = AntBehaviorState::Idle;
-                    self.npcs_dirty = true;
-                }
-                return;
-            }
-        }
+        tick_worker(self, index, queen_pos, events);
+    }
+
+    pub(crate) fn tick_food_gatherer_worker(
+        &mut self,
+        index: usize,
+        queen_pos: Option<Position>,
+        events: &mut Vec<String>,
+    ) {
         self.tick_worker_memory(index);
+        let npc_hive = self.npcs[index].hive_id;
         let npc_pos = self.npcs[index].pos;
         let npc_id = self.npcs[index].id;
         let behavior = self.npcs[index].behavior;
@@ -717,52 +684,38 @@ impl GameState {
             return;
         }
         let assigned_role = self.choose_worker_role_for_hatch(egg_hive_id);
-        let starts_foraging = assigned_role.as_deref() == Some(FOOD_GATHERER_ROLE_PATH);
-        let queen_chamber_max_radii = (assigned_role.as_deref() == Some(QUEEN_CHAMBER_ROLE_PATH))
-            .then(|| self.queen_chamber_max_radii());
 
-        let egg = &mut self.npcs[index];
-        egg.kind = NpcKind::Worker;
-        egg.health = NpcKind::Worker.max_health();
-        egg.food = 0;
-        egg.age_ticks = 0;
-        egg.behavior = if starts_foraging {
-            AntBehaviorState::Searching
-        } else {
-            AntBehaviorState::Idle
-        };
-        egg.carrying_food = false;
-        egg.carrying_food_ticks = 0;
-        egg.home_trail_steps = starts_foraging.then_some(0);
-        egg.recent_home_dir = None;
-        egg.recent_food_dir = None;
-        egg.recent_home_memory_ticks = 0;
-        egg.recent_food_memory_ticks = 0;
-        egg.recent_positions.clear();
-        egg.search_destination = None;
-        egg.search_destination_stuck_ticks = 0;
-        egg.has_delivered_food = false;
-        egg.role = assigned_role.clone();
-        if let Some((max_x, max_y)) = queen_chamber_max_radii {
-            egg.chamber_growth_mode = random_queen_chamber_growth_mode(&mut self.rng);
-            let (radius_x, radius_y) =
-                queen_chamber_initial_radii_for_mode(egg.chamber_growth_mode, max_x, max_y);
-            egg.chamber_radius_x = Some(radius_x);
-            egg.chamber_radius_y = Some(radius_y);
-            egg.chamber_anchor = None;
-            egg.chamber_has_left_anchor = false;
-        } else {
+        {
+            let egg = &mut self.npcs[index];
+            egg.kind = NpcKind::Worker;
+            egg.health = NpcKind::Worker.max_health();
+            egg.food = 0;
+            egg.age_ticks = 0;
+            egg.behavior = AntBehaviorState::Idle;
+            egg.carrying_food = false;
+            egg.carrying_food_ticks = 0;
+            egg.home_trail_steps = None;
+            egg.recent_home_dir = None;
+            egg.recent_food_dir = None;
+            egg.recent_home_memory_ticks = 0;
+            egg.recent_food_memory_ticks = 0;
+            egg.recent_positions.clear();
+            egg.search_destination = None;
+            egg.search_destination_stuck_ticks = 0;
+            egg.has_delivered_food = false;
+            egg.role = assigned_role.clone();
             egg.chamber_radius_x = None;
             egg.chamber_radius_y = None;
             egg.chamber_anchor = None;
             egg.chamber_has_left_anchor = false;
             egg.chamber_growth_mode = QueenChamberGrowthMode::Outward;
         }
+        initialize_worker_role(self, index);
         self.egg_hatched_count = self.egg_hatched_count.saturating_add(1);
-        let hatched_id = egg.id;
-        let hatched_hive_id = egg.hive_id;
-        let hatched_pos = egg.pos;
-        let hatched_role = egg
+        let hatched_id = self.npcs[index].id;
+        let hatched_hive_id = self.npcs[index].hive_id;
+        let hatched_pos = self.npcs[index].pos;
+        let hatched_role = self.npcs[index]
             .role
             .clone()
             .unwrap_or_else(|| DEFAULT_WORKER_ROLE_PATH.to_string());
@@ -787,7 +740,7 @@ impl GameState {
         });
     }
 
-    fn tick_queen_chamber_worker(
+    pub(crate) fn tick_queen_chamber_worker(
         &mut self,
         index: usize,
         queen_pos: Option<Position>,
@@ -884,7 +837,18 @@ impl GameState {
         }
     }
 
-    fn worker_role_path(&self, index: usize) -> &str {
+    pub(crate) fn set_worker_idle(&mut self, index: usize) {
+        if self.npcs[index].behavior != AntBehaviorState::Idle {
+            self.npcs[index].behavior = AntBehaviorState::Idle;
+            self.npcs_dirty = true;
+        }
+    }
+
+    pub(crate) fn next_queen_chamber_growth_mode(&mut self) -> QueenChamberGrowthMode {
+        crate::ant_roles::queen_chamber::random_queen_chamber_growth_mode(&mut self.rng)
+    }
+
+    pub(crate) fn worker_role_path(&self, index: usize) -> &str {
         self.npcs[index]
             .role
             .as_deref()
@@ -892,7 +856,7 @@ impl GameState {
     }
 
     fn choose_worker_role_for_hatch(&self, hive_id: Option<u16>) -> Option<String> {
-        let roles = self.configured_worker_roles();
+        let roles = configured_worker_roles(&self.config);
         if roles.is_empty() {
             return Some(DEFAULT_WORKER_ROLE_PATH.to_string());
         }
@@ -954,22 +918,6 @@ impl GameState {
         }
 
         best_role.map(|role| role.path.clone())
-    }
-
-    fn configured_worker_roles(&self) -> Vec<WorkerRoleDefinition> {
-        let mut roles = Vec::new();
-        if let Some(root) = self.config.pointer("/colony/roles") {
-            collect_worker_roles(root, &mut Vec::new(), &mut roles);
-        }
-        if roles.is_empty() {
-            roles.push(WorkerRoleDefinition {
-                path: DEFAULT_WORKER_ROLE_PATH.to_string(),
-                lifespan_ticks: NPC_WORKER_LIFESPAN_TICKS,
-                weight: 1,
-            });
-        }
-        roles.sort_by(|left, right| left.path.cmp(&right.path));
-        roles
     }
 
     fn choose_queen_chamber_step(&mut self, index: usize, queen_pos: Position) -> Option<Position> {
@@ -1354,14 +1302,14 @@ impl GameState {
         true
     }
 
-    fn find_queen_pos(&self, hive_id: u16) -> Option<Position> {
+    pub(crate) fn find_queen_pos(&self, hive_id: u16) -> Option<Position> {
         self.npcs
             .iter()
             .find(|npc| npc.kind == NpcKind::Queen && npc.hive_id == Some(hive_id))
             .map(|npc| npc.pos)
     }
 
-    fn tick_worker_memory(&mut self, index: usize) {
+    pub(crate) fn tick_worker_memory(&mut self, index: usize) {
         let Some(hive_id) = self.npcs[index].hive_id else {
             return;
         };
@@ -1507,7 +1455,7 @@ impl GameState {
         }
     }
 
-    fn refresh_local_field_destination(
+    pub(crate) fn refresh_local_field_destination(
         &mut self,
         index: usize,
         hive_id: u16,
@@ -1666,7 +1614,7 @@ impl GameState {
         )
     }
 
-    fn update_search_destination_progress(
+    pub(crate) fn update_search_destination_progress(
         &mut self,
         index: usize,
         current_pos: Position,
@@ -1895,7 +1843,7 @@ impl GameState {
 impl GameState {
     fn worker_lifespan_ticks_for(&self, index: usize) -> u16 {
         let role_path = self.worker_role_path(index);
-        self.configured_worker_roles()
+        configured_worker_roles(&self.config)
             .into_iter()
             .find(|role| role.path == role_path)
             .map(|role| role.lifespan_ticks)
@@ -1946,7 +1894,7 @@ impl GameState {
         config_i32(&self.config, "colony.queen_no_fill_radius", 8).max(0)
     }
 
-    fn queen_chamber_max_radii(&self) -> (i32, i32) {
+    pub(crate) fn queen_chamber_max_radii(&self) -> (i32, i32) {
         let radius_x = config_i32(
             &self.config,
             "colony.roles.hive_maintenance.queen_chamber.radius_x",
@@ -1984,10 +1932,10 @@ impl GameState {
         (
             self.npcs[index]
                 .chamber_radius_x
-                .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
+                .unwrap_or(2),
             self.npcs[index]
                 .chamber_radius_y
-                .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
+                .unwrap_or(2),
         )
     }
 
@@ -2010,14 +1958,14 @@ impl GameState {
             }
             Some(anchor) if self.npcs[index].chamber_has_left_anchor && pos == anchor => {
                 let (max_x, max_y) = self.queen_chamber_max_radii();
-                let min_x = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_x);
-                let min_y = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_y);
+                let min_x = 2.min(max_x);
+                let min_y = 2.min(max_y);
                 let current_x = self.npcs[index]
                     .chamber_radius_x
-                    .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
+                    .unwrap_or(2);
                 let current_y = self.npcs[index]
                     .chamber_radius_y
-                    .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
+                    .unwrap_or(2);
                 let (next_x, next_y) = match self.npcs[index].chamber_growth_mode {
                     QueenChamberGrowthMode::Outward => {
                         ((current_x + 1).min(max_x), (current_y + 1).min(max_y))
@@ -2144,52 +2092,6 @@ fn same_hive(left: Option<u16>, right: Option<u16>) -> bool {
         (Some(left), Some(right)) => left == right,
         (None, None) => true,
         _ => false,
-    }
-}
-
-fn collect_worker_roles(
-    value: &Value,
-    path: &mut Vec<String>,
-    roles: &mut Vec<WorkerRoleDefinition>,
-) {
-    let Some(object) = value.as_object() else {
-        return;
-    };
-
-    if !path.is_empty()
-        && let Some(weight) = object
-            .get("weight")
-            .and_then(Value::as_u64)
-            .and_then(|weight| u16::try_from(weight).ok())
-        && weight > 0
-    {
-        let lifespan_ticks = object
-            .get("lifespan")
-            .and_then(Value::as_u64)
-            .and_then(|lifespan| u16::try_from(lifespan).ok())
-            .unwrap_or(NPC_WORKER_LIFESPAN_TICKS);
-        roles.push(WorkerRoleDefinition {
-            path: path.join("."),
-            lifespan_ticks,
-            weight,
-        });
-    }
-
-    let mut child_keys: Vec<_> = object
-        .keys()
-        .filter(|key| !matches!(key.as_str(), "weight" | "lifespan"))
-        .collect();
-    child_keys.sort();
-    for key in child_keys {
-        let Some(child) = object.get(key) else {
-            continue;
-        };
-        if !child.is_object() {
-            continue;
-        }
-        path.push(key.clone());
-        collect_worker_roles(child, path, roles);
-        path.pop();
     }
 }
 
