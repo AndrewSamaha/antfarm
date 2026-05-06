@@ -8,10 +8,11 @@ use crate::{
     types::Position,
 };
 
-pub(crate) use queen_chamber::queen_chamber_initial_radii_for_mode;
-
 pub(crate) const FOOD_GATHERER_ROLE_PATH: &str = crate::DEFAULT_WORKER_ROLE_PATH;
 pub(crate) const QUEEN_CHAMBER_ROLE_PATH: &str = "hive_maintenance.queen_chamber";
+
+type TickFn = fn(&mut GameState, usize, Option<Position>, &mut Vec<String>);
+type OnHatchFn = fn(&mut GameState, usize);
 
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerRoleDefinition {
@@ -20,24 +21,41 @@ pub(crate) struct WorkerRoleDefinition {
     pub(crate) weight: u16,
 }
 
+struct RoleHandler {
+    path: &'static str,
+    tick: TickFn,
+    on_hatch: OnHatchFn,
+}
+
+const ROLE_HANDLERS: &[RoleHandler] = &[
+    RoleHandler {
+        path: FOOD_GATHERER_ROLE_PATH,
+        tick: food_gatherer::tick,
+        on_hatch: food_gatherer::on_hatch,
+    },
+    RoleHandler {
+        path: QUEEN_CHAMBER_ROLE_PATH,
+        tick: queen_chamber::tick,
+        on_hatch: queen_chamber::on_hatch,
+    },
+];
+
 pub(crate) fn tick_worker(
     game: &mut GameState,
     index: usize,
     queen_pos: Option<Position>,
     events: &mut Vec<String>,
 ) {
-    match game.worker_role_path(index) {
-        FOOD_GATHERER_ROLE_PATH => food_gatherer::tick(game, index, queen_pos, events),
-        QUEEN_CHAMBER_ROLE_PATH => queen_chamber::tick(game, index, queen_pos, events),
-        _ => set_idle(game, index),
+    match role_handler(game.worker_role_path(index)) {
+        Some(handler) => (handler.tick)(game, index, queen_pos, events),
+        None => set_idle(game, index),
     }
 }
 
 pub(crate) fn initialize_worker_role(game: &mut GameState, index: usize) {
-    match game.worker_role_path(index) {
-        FOOD_GATHERER_ROLE_PATH => food_gatherer::on_hatch(game, index),
-        QUEEN_CHAMBER_ROLE_PATH => queen_chamber::on_hatch(game, index),
-        _ => set_idle(game, index),
+    match role_handler(game.worker_role_path(index)) {
+        Some(handler) => (handler.on_hatch)(game, index),
+        None => set_idle(game, index),
     }
 }
 
@@ -59,6 +77,10 @@ pub(crate) fn configured_worker_roles(config: &Value) -> Vec<WorkerRoleDefinitio
 
 fn set_idle(game: &mut GameState, index: usize) {
     game.set_worker_idle(index);
+}
+
+fn role_handler(path: &str) -> Option<&'static RoleHandler> {
+    ROLE_HANDLERS.iter().find(|handler| handler.path == path)
 }
 
 fn collect_worker_roles(

@@ -395,13 +395,13 @@ impl GameState {
         self.event_log_dirty = true;
     }
 
-    fn push_npc_debug_event(&mut self, event: NpcDebugEvent) {
+    pub(crate) fn push_npc_debug_event(&mut self, event: NpcDebugEvent) {
         if self.npc_debug_enabled {
             self.npc_debug_events.push(event);
         }
     }
 
-    fn set_world_tile(&mut self, pos: Position, tile: Tile) {
+    pub(crate) fn set_world_tile(&mut self, pos: Position, tile: Tile) {
         if self.world.tile(pos) == Some(tile) {
             return;
         }

@@ -8,8 +8,7 @@ const DEFAULT_QUEEN_CHAMBER_RADIUS_Y: i32 = 15;
 
 use crate::{
     ant_roles::{
-        WorkerRoleDefinition, configured_worker_roles, initialize_worker_role,
-        queen_chamber_initial_radii_for_mode, tick_worker,
+        WorkerRoleDefinition, configured_worker_roles, initialize_worker_role, tick_worker,
     },
     config::{config_f64, config_i32, config_u16, config_u64},
     constants::{
@@ -740,108 +739,15 @@ impl GameState {
         });
     }
 
-    pub(crate) fn tick_queen_chamber_worker(
-        &mut self,
-        index: usize,
-        queen_pos: Option<Position>,
-        events: &mut Vec<String>,
-    ) {
-        if self.npcs[index].behavior != AntBehaviorState::Idle {
-            self.npcs[index].behavior = AntBehaviorState::Idle;
-            self.npcs_dirty = true;
-        }
-        let Some(queen_pos) = queen_pos else {
-            return;
-        };
-
-        let npc_pos = self.npcs[index].pos;
-        let queen_distance = floor_euclidean_distance(npc_pos, queen_pos);
-        let next_step = self.choose_queen_chamber_step(index, queen_pos);
-        let Some(next_step) = next_step else {
-            self.push_npc_debug_event(crate::NpcDebugEvent {
-                tick: self.tick,
-                npc_id: self.npcs[index].id,
-                hive_id: self.npcs[index].hive_id,
-                event_type: "queen_chamber_hold".to_string(),
-                pos: npc_pos,
-                details: json!({
-                    "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
-                    "queen_distance": queen_distance,
-                }),
-            });
-            return;
-        };
-
-        match self.world.tile(next_step) {
-            Some(Tile::Empty) => {
-                self.npcs[index].pos = next_step;
-                remember_recent_position(&mut self.npcs[index].recent_positions, next_step);
-                self.npcs_dirty = true;
-                self.push_npc_debug_event(crate::NpcDebugEvent {
-                    tick: self.tick,
-                    npc_id: self.npcs[index].id,
-                    hive_id: self.npcs[index].hive_id,
-                    event_type: "queen_chamber_move".to_string(),
-                    pos: npc_pos,
-                    details: json!({
-                        "next_step": { "x": next_step.x, "y": next_step.y },
-                        "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
-                        "queen_distance_before": queen_distance,
-                        "queen_distance_after": floor_euclidean_distance(next_step, queen_pos),
-                    }),
-                });
-            }
-            Some(Tile::Dirt) | Some(Tile::Resource) | Some(Tile::Food) => {
-                let traversed_tile = self.world.tile(next_step).unwrap_or(Tile::Empty);
-                match traversed_tile {
-                    Tile::Dirt => add_inventory(&mut self.npcs[index].inventory, "dirt", 1),
-                    Tile::Resource => add_inventory(&mut self.npcs[index].inventory, "ore", 1),
-                    _ => {}
-                };
-                self.set_world_tile(next_step, Tile::Empty);
-                self.npcs[index].pos = next_step;
-                remember_recent_position(&mut self.npcs[index].recent_positions, next_step);
-                self.npcs_dirty = true;
-                events.push(format!(
-                    "NPC ant {} cleared queen chamber path at {},{}",
-                    self.npcs[index].id, next_step.x, next_step.y
-                ));
-                self.push_npc_debug_event(crate::NpcDebugEvent {
-                    tick: self.tick,
-                    npc_id: self.npcs[index].id,
-                    hive_id: self.npcs[index].hive_id,
-                    event_type: "queen_chamber_dig".to_string(),
-                    pos: npc_pos,
-                    details: json!({
-                        "target": { "x": next_step.x, "y": next_step.y },
-                        "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
-                        "queen_distance_before": queen_distance,
-                    }),
-                });
-                self.push_npc_debug_event(crate::NpcDebugEvent {
-                    tick: self.tick,
-                    npc_id: self.npcs[index].id,
-                    hive_id: self.npcs[index].hive_id,
-                    event_type: "queen_chamber_move".to_string(),
-                    pos: npc_pos,
-                    details: json!({
-                        "next_step": { "x": next_step.x, "y": next_step.y },
-                        "queen_pos": { "x": queen_pos.x, "y": queen_pos.y },
-                        "queen_distance_before": queen_distance,
-                        "queen_distance_after": floor_euclidean_distance(next_step, queen_pos),
-                        "moved_through": tile_name(traversed_tile),
-                    }),
-                });
-            }
-            Some(Tile::Stone | Tile::Bedrock) | None => {}
-        }
-    }
-
     pub(crate) fn set_worker_idle(&mut self, index: usize) {
         if self.npcs[index].behavior != AntBehaviorState::Idle {
             self.npcs[index].behavior = AntBehaviorState::Idle;
             self.npcs_dirty = true;
         }
+    }
+
+    pub(crate) fn mark_npcs_dirty(&mut self) {
+        self.npcs_dirty = true;
     }
 
     pub(crate) fn next_queen_chamber_growth_mode(&mut self) -> QueenChamberGrowthMode {
@@ -920,104 +826,7 @@ impl GameState {
         best_role.map(|role| role.path.clone())
     }
 
-    fn choose_queen_chamber_step(&mut self, index: usize, queen_pos: Position) -> Option<Position> {
-        let origin = self.npcs[index].pos;
-        self.ensure_queen_chamber_radii_initialized(index);
-        let (mut radius_x, mut radius_y) = self.queen_chamber_current_radii(index);
-        let mut ring = queen_chamber_perimeter(
-            queen_pos,
-            radius_x,
-            radius_y,
-            self.world.width(),
-            self.world.height(),
-        );
-        if ring.is_empty() {
-            self.npcs[index].search_destination = None;
-            return None;
-        }
-
-        let current_index = ring.iter().position(|pos| *pos == origin);
-        let mut target_index = self.npcs[index]
-            .search_destination
-            .and_then(|target| ring.iter().position(|pos| *pos == target));
-
-        if let Some(initial_current_index) = current_index {
-            self.update_queen_chamber_growth_state(index, origin, &ring);
-            let (updated_radius_x, updated_radius_y) = self.queen_chamber_current_radii(index);
-            let current_index = if updated_radius_x != radius_x || updated_radius_y != radius_y {
-                radius_x = updated_radius_x;
-                radius_y = updated_radius_y;
-                ring = queen_chamber_perimeter(
-                    queen_pos,
-                    radius_x,
-                    radius_y,
-                    self.world.width(),
-                    self.world.height(),
-                );
-                target_index = None;
-                if ring.is_empty() {
-                    self.npcs[index].search_destination = None;
-                    return None;
-                }
-                match ring.iter().position(|pos| *pos == origin) {
-                    Some(current_index) => current_index,
-                    None => {
-                        let (step, target) = self
-                            .queen_chamber_bfs_to_any_ring_cell(index, origin, &ring, queen_pos)?;
-                        self.npcs[index].search_destination = Some(target);
-                        return Some(step);
-                    }
-                }
-            } else {
-                initial_current_index
-            };
-            let default_next = (current_index + 1) % ring.len();
-            if target_index.is_none() || target_index == Some(current_index) {
-                target_index = Some(default_next);
-            }
-            for offset in 0..ring.len() {
-                let candidate_index = (target_index.unwrap_or(default_next) + offset) % ring.len();
-                let target = ring[candidate_index];
-                if let Some(step) =
-                    self.queen_chamber_bfs_first_step(index, origin, target, queen_pos)
-                {
-                    self.npcs[index].search_destination = Some(target);
-                    return Some(step);
-                }
-            }
-            self.npcs[index].search_destination = None;
-            return None;
-        }
-
-        if let Some(target_index) = target_index {
-            let target = ring[target_index];
-            if let Some(step) = self.queen_chamber_bfs_first_step(index, origin, target, queen_pos)
-            {
-                self.npcs[index].search_destination = Some(target);
-                return Some(step);
-            }
-        }
-
-        let (step, target) =
-            self.queen_chamber_bfs_to_any_ring_cell(index, origin, &ring, queen_pos)?;
-        self.npcs[index].search_destination = Some(target);
-        Some(step)
-    }
-
-    fn queen_chamber_tile_traversable(&self, index: usize, pos: Position) -> bool {
-        if !self.world.in_bounds(pos)
-            || self.players.values().any(|player| player.pos == pos)
-            || self.npc_blocks_movement(pos, index)
-        {
-            return false;
-        }
-        matches!(
-            self.world.tile(pos),
-            Some(Tile::Empty | Tile::Dirt | Tile::Resource | Tile::Food)
-        )
-    }
-
-    fn npc_blocks_movement(&self, pos: Position, mover_index: usize) -> bool {
+    pub(crate) fn npc_blocks_movement(&self, pos: Position, mover_index: usize) -> bool {
         let mover_hive_id = self.npcs[mover_index].hive_id;
         self.npcs.iter().enumerate().any(|(index, npc)| {
             index != mover_index && npc.pos == pos && !same_hive(mover_hive_id, npc.hive_id)
@@ -1029,69 +838,6 @@ impl GameState {
             .iter()
             .enumerate()
             .any(|(index, npc)| Some(index) != ignore_index && npc.pos == pos)
-    }
-
-    fn queen_chamber_bfs_first_step(
-        &self,
-        index: usize,
-        origin: Position,
-        destination: Position,
-        queen_pos: Position,
-    ) -> Option<Position> {
-        if origin == destination {
-            return None;
-        }
-
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        visited.insert(origin);
-        queue.push_back((origin, None::<Position>));
-
-        while let Some((pos, first_step)) = queue.pop_front() {
-            for next in queen_chamber_neighbor_order(pos, queen_pos) {
-                if visited.contains(&next) || !self.queen_chamber_tile_traversable(index, next) {
-                    continue;
-                }
-                let first_step = first_step.or(Some(next));
-                if next == destination {
-                    return first_step;
-                }
-                visited.insert(next);
-                queue.push_back((next, first_step));
-            }
-        }
-
-        None
-    }
-
-    fn queen_chamber_bfs_to_any_ring_cell(
-        &self,
-        index: usize,
-        origin: Position,
-        ring: &[Position],
-        queen_pos: Position,
-    ) -> Option<(Position, Position)> {
-        let ring_positions: HashSet<_> = ring.iter().copied().collect();
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        visited.insert(origin);
-        queue.push_back((origin, None::<Position>));
-
-        while let Some((pos, first_step)) = queue.pop_front() {
-            for next in queen_chamber_neighbor_order(pos, queen_pos) {
-                if visited.contains(&next) || !self.queen_chamber_tile_traversable(index, next) {
-                    continue;
-                }
-                let first_step = first_step.or(Some(next));
-                if ring_positions.contains(&next) {
-                    return first_step.map(|step| (step, next));
-                }
-                visited.insert(next);
-                queue.push_back((next, first_step));
-            }
-        }
-
-        None
     }
 
     fn try_place_dirt(
@@ -1910,80 +1656,6 @@ impl GameState {
         (radius_x, radius_y)
     }
 
-    fn ensure_queen_chamber_radii_initialized(&mut self, index: usize) {
-        if self.npcs[index].chamber_radius_x.is_some()
-            && self.npcs[index].chamber_radius_y.is_some()
-        {
-            return;
-        }
-        let (max_x, max_y) = self.queen_chamber_max_radii();
-        let (radius_x, radius_y) = queen_chamber_initial_radii_for_mode(
-            self.npcs[index].chamber_growth_mode,
-            max_x,
-            max_y,
-        );
-        self.npcs[index].chamber_radius_x = Some(radius_x);
-        self.npcs[index].chamber_radius_y = Some(radius_y);
-        self.npcs[index].chamber_anchor = None;
-        self.npcs[index].chamber_has_left_anchor = false;
-    }
-
-    fn queen_chamber_current_radii(&self, index: usize) -> (i32, i32) {
-        (
-            self.npcs[index]
-                .chamber_radius_x
-                .unwrap_or(2),
-            self.npcs[index]
-                .chamber_radius_y
-                .unwrap_or(2),
-        )
-    }
-
-    fn update_queen_chamber_growth_state(
-        &mut self,
-        index: usize,
-        pos: Position,
-        ring: &[Position],
-    ) {
-        if !ring.contains(&pos) {
-            return;
-        }
-        match self.npcs[index].chamber_anchor {
-            None => {
-                self.npcs[index].chamber_anchor = Some(pos);
-                self.npcs[index].chamber_has_left_anchor = false;
-            }
-            Some(anchor) if !self.npcs[index].chamber_has_left_anchor && pos != anchor => {
-                self.npcs[index].chamber_has_left_anchor = true;
-            }
-            Some(anchor) if self.npcs[index].chamber_has_left_anchor && pos == anchor => {
-                let (max_x, max_y) = self.queen_chamber_max_radii();
-                let min_x = 2.min(max_x);
-                let min_y = 2.min(max_y);
-                let current_x = self.npcs[index]
-                    .chamber_radius_x
-                    .unwrap_or(2);
-                let current_y = self.npcs[index]
-                    .chamber_radius_y
-                    .unwrap_or(2);
-                let (next_x, next_y) = match self.npcs[index].chamber_growth_mode {
-                    QueenChamberGrowthMode::Outward => {
-                        ((current_x + 1).min(max_x), (current_y + 1).min(max_y))
-                    }
-                    QueenChamberGrowthMode::Inward => {
-                        ((current_x - 1).max(min_x), (current_y - 1).max(min_y))
-                    }
-                };
-                self.npcs[index].chamber_radius_x = Some(next_x);
-                self.npcs[index].chamber_radius_y = Some(next_y);
-                self.npcs[index].chamber_anchor = None;
-                self.npcs[index].chamber_has_left_anchor = false;
-                self.npcs[index].search_destination = None;
-            }
-            _ => {}
-        }
-    }
-
     fn dirt_place_cooldown_ticks(&self) -> u64 {
         config_u64(&self.config, "colony.dirt_place_cooldown_ticks", 11)
     }
@@ -2095,117 +1767,6 @@ fn same_hive(left: Option<u16>, right: Option<u16>) -> bool {
     }
 }
 
-fn queen_chamber_perimeter(
-    queen: Position,
-    radius_x: i32,
-    radius_y: i32,
-    world_width: i32,
-    world_height: i32,
-) -> Vec<Position> {
-    let min_x = (queen.x - radius_x - 1).max(0);
-    let max_x = (queen.x + radius_x + 1).min(world_width.saturating_sub(1));
-    let min_y = (queen.y - radius_y - 1).max(0);
-    let max_y = (queen.y + radius_y + 1).min(world_height.saturating_sub(1));
-    let mut ring = Vec::new();
-
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            let pos = Position { x, y };
-            let value = ellipse_boundary_value(pos, queen, radius_x, radius_y);
-            if value > 1.0 {
-                continue;
-            }
-            let touches_outside = [
-                pos.offset(-1, 0),
-                pos.offset(1, 0),
-                pos.offset(0, -1),
-                pos.offset(0, 1),
-            ]
-            .into_iter()
-            .any(|neighbor| {
-                !in_ellipse_bounds(neighbor, world_width, world_height)
-                    || ellipse_boundary_value(neighbor, queen, radius_x, radius_y) > 1.0
-            });
-            if touches_outside {
-                ring.push(pos);
-            }
-        }
-    }
-
-    ring.sort_by(|left, right| {
-        clockwise_angle(queen, *left)
-            .total_cmp(&clockwise_angle(queen, *right))
-            .then_with(|| {
-                ellipse_boundary_value(*right, queen, radius_x, radius_y)
-                    .total_cmp(&ellipse_boundary_value(*left, queen, radius_x, radius_y))
-            })
-            .then_with(|| left.y.cmp(&right.y))
-            .then_with(|| left.x.cmp(&right.x))
-    });
-    ring.dedup();
-    ring
-}
-
-fn in_ellipse_bounds(pos: Position, world_width: i32, world_height: i32) -> bool {
-    pos.x >= 0 && pos.y >= 0 && pos.x < world_width && pos.y < world_height
-}
-
-fn clockwise_tangent(current: Position, queen: Position) -> (i32, i32) {
-    let radial_x = current.x - queen.x;
-    let radial_y = current.y - queen.y;
-    let tangent = (-radial_y, radial_x);
-    if tangent.0 == 0 && tangent.1 == 0 {
-        (1, 0)
-    } else {
-        tangent
-    }
-}
-
-fn queen_chamber_neighbor_order(current: Position, queen: Position) -> [Position; 4] {
-    let tangent = clockwise_tangent(current, queen);
-    let radial = (current.x - queen.x, current.y - queen.y);
-    let clockwise = unit_cardinal_step(tangent);
-    let inward = unit_cardinal_step((-radial.0, -radial.1));
-    let outward = unit_cardinal_step(radial);
-    let counter_clockwise = (-clockwise.0, -clockwise.1);
-    [
-        current.offset(clockwise.0, clockwise.1),
-        current.offset(inward.0, inward.1),
-        current.offset(outward.0, outward.1),
-        current.offset(counter_clockwise.0, counter_clockwise.1),
-    ]
-}
-
-fn unit_cardinal_step((dx, dy): (i32, i32)) -> (i32, i32) {
-    if dx == 0 && dy == 0 {
-        return (1, 0);
-    }
-    if dx.abs() >= dy.abs() {
-        (dx.signum(), 0)
-    } else {
-        (0, dy.signum())
-    }
-}
-
-fn clockwise_angle(center: Position, pos: Position) -> f64 {
-    let dx = f64::from(pos.x - center.x);
-    let dy = f64::from(center.y - pos.y);
-    let angle = dx.atan2(dy);
-    if angle < 0.0 {
-        angle + std::f64::consts::TAU
-    } else {
-        angle
-    }
-}
-
-fn ellipse_boundary_value(pos: Position, center: Position, radius_x: i32, radius_y: i32) -> f64 {
-    let dx = f64::from(pos.x - center.x);
-    let dy = f64::from(pos.y - center.y);
-    let rx = f64::from(radius_x.max(1));
-    let ry = f64::from(radius_y.max(1));
-    ((dx * dx) / (rx * rx)) + ((dy * dy) / (ry * ry))
-}
-
 fn local_field_destination_bias(current: Position, next: Position, destination: Position) -> u32 {
     let current_distance = manhattan_distance(current, destination);
     let next_distance = manhattan_distance(next, destination);
@@ -2222,16 +1783,6 @@ fn local_field_destination_bias(current: Position, next: Position, destination: 
 
 fn manhattan_distance(a: Position, b: Position) -> i32 {
     (a.x - b.x).abs() + (a.y - b.y).abs()
-}
-
-fn euclidean_distance(a: Position, b: Position) -> f64 {
-    let dx = f64::from(a.x - b.x);
-    let dy = f64::from(a.y - b.y);
-    (dx * dx + dy * dy).sqrt()
-}
-
-fn floor_euclidean_distance(a: Position, b: Position) -> i32 {
-    euclidean_distance(a, b).floor() as i32
 }
 
 fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position) {
