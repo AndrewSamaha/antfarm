@@ -26,7 +26,8 @@ use crate::{
     npc::nearest_open_tile,
     pheromones::{AntBehaviorState, PheromoneChannel},
     types::{
-        DEFAULT_WORKER_ROLE_PATH, MoveDir, NpcAnt, NpcKind, Position, QueenChamberGrowthMode, Tile,
+        DEFAULT_WORKER_ROLE_PATH, MoveDir, NpcAnt, NpcKind, NpcRoleState, Position,
+        QueenChamberGrowthMode, Tile,
     },
 };
 
@@ -181,11 +182,7 @@ impl GameState {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: None,
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.npcs_dirty = true;
@@ -244,11 +241,7 @@ impl GameState {
             egg.search_destination_stuck_ticks = 0;
             egg.has_delivered_food = false;
             egg.role = assigned_role.clone();
-            egg.chamber_radius_x = None;
-            egg.chamber_radius_y = None;
-            egg.chamber_anchor = None;
-            egg.chamber_has_left_anchor = false;
-            egg.chamber_growth_mode = QueenChamberGrowthMode::Outward;
+            egg.clear_role_state();
         }
         initialize_worker_role(self, index);
         self.egg_hatched_count = self.egg_hatched_count.saturating_add(1);

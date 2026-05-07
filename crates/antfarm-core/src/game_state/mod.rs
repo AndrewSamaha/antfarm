@@ -438,7 +438,8 @@ mod tests {
         protocol::PlacedArt,
         replay::ReplayArtifact,
         types::{
-            DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, Position, QueenChamberGrowthMode, Tile,
+            DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, NpcRoleState, Position,
+            QueenChamberGrowthMode, QueenChamberState, Tile,
         },
     };
     use rand::{SeedableRng, rngs::StdRng};
@@ -653,11 +654,13 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
 
         for _ in 0..40 {
@@ -770,11 +773,13 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(6),
-            chamber_radius_y: Some(5),
-            chamber_anchor: Some(start),
-            chamber_has_left_anchor: true,
-            chamber_growth_mode: QueenChamberGrowthMode::Inward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(6),
+                radius_y: Some(5),
+                anchor: Some(start),
+                has_left_anchor: true,
+                growth_mode: QueenChamberGrowthMode::Inward,
+            }),
         });
 
         game.tick();
@@ -784,8 +789,9 @@ mod tests {
             .iter()
             .find(|npc| npc.id == worker_id)
             .expect("worker should still exist");
-        assert_eq!(worker.chamber_radius_x, Some(5));
-        assert_eq!(worker.chamber_radius_y, Some(4));
+        let state = worker.queen_chamber_state();
+        assert_eq!(state.radius_x, Some(5));
+        assert_eq!(state.radius_y, Some(4));
     }
 
     #[test]
@@ -854,11 +860,13 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
         game.set_world_tile(start.offset(1, 0), Tile::Stone);
 
@@ -942,11 +950,13 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
 
         game.tick();
@@ -1024,11 +1034,13 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
 
         game.tick();
@@ -1100,11 +1112,7 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance".to_string()),
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
 
         let mover_id = game.next_npc_id;
@@ -1134,11 +1142,7 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("food_gatherer".to_string()),
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
 
         game.tick();
@@ -1296,11 +1300,7 @@ mod tests {
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: None,
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
         game.next_npc_id = game.next_npc_id.saturating_add(1);
         game.npcs_dirty = true;

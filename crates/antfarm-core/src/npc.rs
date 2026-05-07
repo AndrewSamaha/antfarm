@@ -1,7 +1,7 @@
 use crate::{
     inventory::default_npc_inventory,
     pheromones::AntBehaviorState,
-    types::{DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, Position, QueenChamberGrowthMode},
+    types::{DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, NpcRoleState, Position},
     world::World,
 };
 
@@ -46,11 +46,7 @@ pub(crate) fn default_npcs_with_count(world: &World, count: u16) -> Vec<NpcAnt> 
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some(DEFAULT_WORKER_ROLE_PATH.to_string()),
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
     }
     npcs
