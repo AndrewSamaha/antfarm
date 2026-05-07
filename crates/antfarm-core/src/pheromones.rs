@@ -6,6 +6,7 @@ use crate::types::Position;
 pub enum PheromoneChannel {
     Home,
     Food,
+    Hub,
     Threat,
     Defense,
 }
@@ -24,6 +25,7 @@ pub struct HivePheromone {
     pub hive_id: u16,
     pub home: u8,
     pub food: u8,
+    pub hub: u8,
     pub threat: u8,
     pub defense: u8,
 }
@@ -142,11 +144,16 @@ impl PheromoneGrid {
             for entry in &mut cell.entries {
                 entry.home = entry.home.saturating_sub(amount);
                 entry.food = entry.food.saturating_sub(amount);
+                entry.hub = entry.hub.saturating_sub(amount);
                 entry.threat = entry.threat.saturating_sub(amount);
                 entry.defense = entry.defense.saturating_sub(amount);
             }
             cell.entries.retain(|entry| {
-                entry.home > 0 || entry.food > 0 || entry.threat > 0 || entry.defense > 0
+                entry.home > 0
+                    || entry.food > 0
+                    || entry.hub > 0
+                    || entry.threat > 0
+                    || entry.defense > 0
             });
         }
     }
@@ -182,6 +189,7 @@ fn channel_value(entry: &HivePheromone, channel: PheromoneChannel) -> u8 {
     match channel {
         PheromoneChannel::Home => entry.home,
         PheromoneChannel::Food => entry.food,
+        PheromoneChannel::Hub => entry.hub,
         PheromoneChannel::Threat => entry.threat,
         PheromoneChannel::Defense => entry.defense,
     }
@@ -191,6 +199,7 @@ fn channel_value_mut(entry: &mut HivePheromone, channel: PheromoneChannel) -> &m
     match channel {
         PheromoneChannel::Home => &mut entry.home,
         PheromoneChannel::Food => &mut entry.food,
+        PheromoneChannel::Hub => &mut entry.hub,
         PheromoneChannel::Threat => &mut entry.threat,
         PheromoneChannel::Defense => &mut entry.defense,
     }

@@ -37,6 +37,11 @@ fn default_config() -> Value {
                     "weight": 3
                 },
                 "hive_maintenance": {
+                    "hub": {
+                        "lifespan": 2000,
+                        "max": 1,
+                        "weight": 1
+                    },
                     "queen_chamber": {
                         "lifespan": 2000,
                         "radius_x": 20,

@@ -1,4 +1,5 @@
 pub(crate) mod food_gatherer;
+pub(crate) mod hub;
 pub(crate) mod queen_chamber;
 
 use serde_json::Value;
@@ -9,6 +10,7 @@ use crate::{
 };
 
 pub(crate) const FOOD_GATHERER_ROLE_PATH: &str = crate::DEFAULT_WORKER_ROLE_PATH;
+pub(crate) const HUB_ROLE_PATH: &str = "hive_maintenance.hub";
 pub(crate) const QUEEN_CHAMBER_ROLE_PATH: &str = "hive_maintenance.queen_chamber";
 
 type TickFn = fn(&mut GameState, usize, Option<Position>, &mut Vec<String>);
@@ -19,6 +21,7 @@ pub(crate) struct WorkerRoleDefinition {
     pub(crate) path: String,
     pub(crate) lifespan_ticks: u16,
     pub(crate) weight: u16,
+    pub(crate) max: Option<u16>,
 }
 
 struct RoleHandler {
@@ -32,6 +35,11 @@ const ROLE_HANDLERS: &[RoleHandler] = &[
         path: FOOD_GATHERER_ROLE_PATH,
         tick: food_gatherer::tick,
         on_hatch: food_gatherer::on_hatch,
+    },
+    RoleHandler {
+        path: HUB_ROLE_PATH,
+        tick: hub::tick,
+        on_hatch: hub::on_hatch,
     },
     RoleHandler {
         path: QUEEN_CHAMBER_ROLE_PATH,
@@ -69,6 +77,7 @@ pub(crate) fn configured_worker_roles(config: &Value) -> Vec<WorkerRoleDefinitio
             path: crate::DEFAULT_WORKER_ROLE_PATH.to_string(),
             lifespan_ticks: crate::NPC_WORKER_LIFESPAN_TICKS,
             weight: 1,
+            max: None,
         });
     }
     roles.sort_by(|left, right| left.path.cmp(&right.path));
@@ -104,16 +113,21 @@ fn collect_worker_roles(
             .and_then(Value::as_u64)
             .and_then(|lifespan| u16::try_from(lifespan).ok())
             .unwrap_or(crate::NPC_WORKER_LIFESPAN_TICKS);
+        let max = object
+            .get("max")
+            .and_then(Value::as_u64)
+            .and_then(|max| u16::try_from(max).ok());
         roles.push(WorkerRoleDefinition {
             path: path.join("."),
             lifespan_ticks,
             weight,
+            max,
         });
     }
 
     let mut child_keys: Vec<_> = object
         .keys()
-        .filter(|key| !matches!(key.as_str(), "weight" | "lifespan"))
+        .filter(|key| !matches!(key.as_str(), "weight" | "lifespan" | "max"))
         .collect();
     child_keys.sort();
     for key in child_keys {

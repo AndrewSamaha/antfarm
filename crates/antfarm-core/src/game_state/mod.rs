@@ -434,6 +434,7 @@ mod tests {
         art::find_ascii_art_asset,
         config::set_config_path,
         inventory::default_npc_inventory,
+        pheromones::PheromoneChannel,
         pheromones::AntBehaviorState,
         protocol::PlacedArt,
         replay::ReplayArtifact,
@@ -441,6 +442,7 @@ mod tests {
             DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, NpcRoleState, Position,
             QueenChamberGrowthMode, QueenChamberState, Tile,
         },
+        SURFACE_Y,
     };
     use rand::{SeedableRng, rngs::StdRng};
     use serde_json::json;
@@ -535,6 +537,12 @@ mod tests {
         });
         set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
             .expect("set queen laying cooldown");
+        set_config_path(
+            &mut config,
+            "colony.roles.hive_maintenance.hub.weight",
+            json!(0),
+        )
+        .expect("disable hub role for queen chamber weighting test");
         let mut game = GameState::from_config(config);
         seed_test_colony(&mut game);
         game.set_queen_eggs(4).expect("seed four eggs");
@@ -564,9 +572,17 @@ mod tests {
             .filter(|npc| npc.role.as_deref() == Some("hive_maintenance.queen_chamber"))
             .cloned()
             .collect();
+        let hub_workers: Vec<_> = game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker)
+            .filter(|npc| npc.role.as_deref() == Some("hive_maintenance.hub"))
+            .cloned()
+            .collect();
 
         assert_eq!(food_gatherers, 3);
         assert_eq!(queen_chamber_workers.len(), 1);
+        assert!(hub_workers.is_empty());
 
         let maintenance_worker = queen_chamber_workers
             .first()
@@ -586,6 +602,86 @@ mod tests {
         assert_eq!(
             maintenance_worker.role.as_deref(),
             Some("hive_maintenance.queen_chamber")
+        );
+    }
+
+    #[test]
+    fn hub_role_is_capped_at_one_per_hive_and_emits_below_ground() {
+        let mut config = json!({
+            "world": { "seed": 13 },
+            "soil": { "settle_frequency": 0.0 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "minimum_delay_to_hatch": 1,
+                "roles": {
+                    "food_gatherer": {
+                        "weight": 1,
+                        "max": 30
+                    },
+                    "hive_maintenance": {
+                        "hub": {
+                            "weight": 1,
+                            "max": 1
+                        }
+                    }
+                }
+            }
+        });
+        set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
+            .expect("set queen laying cooldown");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        game.set_queen_eggs(4).expect("seed four eggs");
+
+        while game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker && npc.hive_id.is_some())
+            .count()
+            < 4
+        {
+            game.tick();
+        }
+
+        let hub_workers: Vec<_> = game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker)
+            .filter(|npc| npc.role.as_deref() == Some("hive_maintenance.hub"))
+            .cloned()
+            .collect();
+        assert_eq!(hub_workers.len(), 1);
+
+        let hub_id = hub_workers[0].id;
+        for _ in 0..400 {
+            game.tick();
+        }
+
+        let hub_worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .expect("hub worker should still exist");
+        let hub_state = hub_worker.hub_state().expect("hub state should exist");
+        assert_eq!(hub_worker.pos, hub_state.hub_center);
+        assert_eq!(hub_state.phase, crate::types::HubPhase::HoldAtHub);
+
+        let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
+        assert!(
+            game.pheromones
+                .value(hub_state.hub_center, hive_id, PheromoneChannel::Hub)
+                > 0
+        );
+        assert_eq!(
+            game.pheromones.value(
+                Position {
+                    x: hub_state.hub_center.x,
+                    y: SURFACE_Y,
+                },
+                hive_id,
+                PheromoneChannel::Hub,
+            ),
+            0
         );
     }
 

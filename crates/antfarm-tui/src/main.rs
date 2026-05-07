@@ -267,13 +267,15 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
                 }
             }
             _ = pheromone_refresh.tick(), if connection.is_some() => {
-                if let (Some(channel), Some(player), Some(connection)) = (app.pheromone_overlay, app.player(), connection.as_mut()) {
-                    if let Some(hive_id) = player.hive_id {
-                        crate::network::send_message(
-                            &mut connection.writer,
-                            ClientMessage::RequestPheromoneMap { hive_id, channel },
-                        ).await?;
-                    }
+                if let (Some(channel), Some(hive_id), Some(connection)) = (
+                    app.pheromone_overlay,
+                    app.preferred_hive_id(),
+                    connection.as_mut(),
+                ) {
+                    crate::network::send_message(
+                        &mut connection.writer,
+                        ClientMessage::RequestPheromoneMap { hive_id, channel },
+                    ).await?;
                 }
             }
             maybe_message = recv_server_message(&mut connection), if connection.is_some() => {

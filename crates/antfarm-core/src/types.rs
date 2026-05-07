@@ -96,12 +96,44 @@ impl Default for QueenChamberState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HubPhase {
+    #[default]
+    DigToHub,
+    DigRightSpur,
+    DigToSurface,
+    ReturnToHub,
+    HoldAtHub,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubState {
+    pub origin: Position,
+    pub hub_center: Position,
+    pub surface_entry: Position,
+    #[serde(default)]
+    pub phase: HubPhase,
+}
+
+impl Default for HubState {
+    fn default() -> Self {
+        Self {
+            origin: Position { x: 0, y: 0 },
+            hub_center: Position { x: 0, y: 0 },
+            surface_entry: Position { x: 0, y: 0 },
+            phase: HubPhase::DigToHub,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", content = "state", rename_all = "snake_case")]
 pub enum NpcRoleState {
     #[default]
     None,
     QueenChamber(QueenChamberState),
+    Hub(HubState),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,12 +203,23 @@ impl NpcAnt {
     pub fn queen_chamber_state(&self) -> QueenChamberState {
         match &self.role_state {
             NpcRoleState::QueenChamber(state) => *state,
-            NpcRoleState::None => QueenChamberState::default(),
+            NpcRoleState::None | NpcRoleState::Hub(_) => QueenChamberState::default(),
         }
     }
 
     pub fn set_queen_chamber_state(&mut self, state: QueenChamberState) {
         self.role_state = NpcRoleState::QueenChamber(state);
+    }
+
+    pub fn hub_state(&self) -> Option<HubState> {
+        match &self.role_state {
+            NpcRoleState::Hub(state) => Some(*state),
+            NpcRoleState::None | NpcRoleState::QueenChamber(_) => None,
+        }
+    }
+
+    pub fn set_hub_state(&mut self, state: HubState) {
+        self.role_state = NpcRoleState::Hub(state);
     }
 
     pub fn clear_role_state(&mut self) {

@@ -99,6 +99,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let label = match channel {
             PheromoneChannel::Home => "home",
             PheromoneChannel::Food => "food",
+            PheromoneChannel::Hub => "hub",
             PheromoneChannel::Threat => "threat",
             PheromoneChannel::Defense => "defense",
         };
@@ -421,6 +422,7 @@ fn pheromone_overlay_bg(app: &App, pos: Position) -> Option<Color> {
     Some(match map.channel {
         PheromoneChannel::Home => Color::Rgb(18, 20 + intensity * 3, 48 + intensity * 5),
         PheromoneChannel::Food => Color::Rgb(20 + intensity * 4, 32 + intensity * 3, 20),
+        PheromoneChannel::Hub => Color::Rgb(22, 40 + intensity * 3, 26 + intensity * 2),
         PheromoneChannel::Threat => Color::Rgb(48 + intensity * 5, 20, 20),
         PheromoneChannel::Defense => Color::Rgb(22, 28, 42 + intensity * 5),
     })

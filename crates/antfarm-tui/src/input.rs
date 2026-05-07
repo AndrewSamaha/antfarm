@@ -150,7 +150,8 @@ pub(crate) async fn handle_event(
             app.pheromone_overlay = match app.pheromone_overlay {
                 None => Some(PheromoneChannel::Home),
                 Some(PheromoneChannel::Home) => Some(PheromoneChannel::Food),
-                Some(PheromoneChannel::Food) => None,
+                Some(PheromoneChannel::Food) => Some(PheromoneChannel::Hub),
+                Some(PheromoneChannel::Hub) => None,
                 Some(PheromoneChannel::Threat | PheromoneChannel::Defense) => None,
             };
             if app.pheromone_overlay.is_none() {

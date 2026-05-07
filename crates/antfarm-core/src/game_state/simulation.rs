@@ -329,14 +329,21 @@ impl GameState {
         }
 
         let total_after_hatch = hive_workers.saturating_add(1);
-        let total_weight: u32 = roles.iter().map(|role| u32::from(role.weight)).sum();
+        let eligible_roles: Vec<_> = roles
+            .iter()
+            .filter(|role| {
+                let current_count = *role_counts.get(role.path.as_str()).unwrap_or(&0);
+                role.max.is_none_or(|max| current_count < max)
+            })
+            .collect();
+        let total_weight: u32 = eligible_roles.iter().map(|role| u32::from(role.weight)).sum();
         if total_weight == 0 {
-            return Some(DEFAULT_WORKER_ROLE_PATH.to_string());
+            return None;
         }
 
         let mut best_role: Option<&WorkerRoleDefinition> = None;
         let mut best_deficit = f64::NEG_INFINITY;
-        for role in &roles {
+        for role in eligible_roles {
             let current_count = f64::from(*role_counts.get(role.path.as_str()).unwrap_or(&0));
             let desired_count =
                 f64::from(total_after_hatch) * f64::from(role.weight) / f64::from(total_weight);
