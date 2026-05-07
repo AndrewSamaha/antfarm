@@ -1,4 +1,4 @@
-mod food_gatherer;
+pub(crate) mod food_gatherer;
 pub(crate) mod queen_chamber;
 
 use serde_json::Value;
