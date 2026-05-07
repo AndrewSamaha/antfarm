@@ -6,7 +6,7 @@ use crate::{
     NpcDebugEvent,
     game_state::GameState,
     inventory::add_inventory,
-    types::{Position, QueenChamberGrowthMode, Tile},
+    types::{Position, QueenChamberGrowthMode, QueenChamberState, Tile},
 };
 
 const INITIAL_QUEEN_CHAMBER_RADIUS: i32 = 2;
@@ -112,11 +112,13 @@ pub(crate) fn on_hatch(game: &mut GameState, index: usize) {
     let worker = &mut game.npcs[index];
     worker.behavior = crate::AntBehaviorState::Idle;
     worker.home_trail_steps = None;
-    worker.chamber_growth_mode = growth_mode;
-    worker.chamber_radius_x = Some(radius_x);
-    worker.chamber_radius_y = Some(radius_y);
-    worker.chamber_anchor = None;
-    worker.chamber_has_left_anchor = false;
+    worker.set_queen_chamber_state(QueenChamberState {
+        radius_x: Some(radius_x),
+        radius_y: Some(radius_y),
+        anchor: None,
+        has_left_anchor: false,
+        growth_mode,
+    });
 }
 
 pub(crate) fn random_queen_chamber_growth_mode<R: Rng + ?Sized>(
@@ -216,22 +218,26 @@ fn choose_step(game: &mut GameState, index: usize, queen_pos: Position) -> Optio
 }
 
 fn ensure_radii_initialized(game: &mut GameState, index: usize) {
-    if game.npcs[index].chamber_radius_x.is_some() && game.npcs[index].chamber_radius_y.is_some() {
+    let state = game.npcs[index].queen_chamber_state();
+    if state.radius_x.is_some() && state.radius_y.is_some() {
         return;
     }
     let (max_x, max_y) = game.queen_chamber_max_radii();
-    let (radius_x, radius_y) =
-        queen_chamber_initial_radii_for_mode(game.npcs[index].chamber_growth_mode, max_x, max_y);
-    game.npcs[index].chamber_radius_x = Some(radius_x);
-    game.npcs[index].chamber_radius_y = Some(radius_y);
-    game.npcs[index].chamber_anchor = None;
-    game.npcs[index].chamber_has_left_anchor = false;
+    let (radius_x, radius_y) = queen_chamber_initial_radii_for_mode(state.growth_mode, max_x, max_y);
+    game.npcs[index].set_queen_chamber_state(QueenChamberState {
+        radius_x: Some(radius_x),
+        radius_y: Some(radius_y),
+        anchor: None,
+        has_left_anchor: false,
+        growth_mode: state.growth_mode,
+    });
 }
 
 fn current_radii(game: &GameState, index: usize) -> (i32, i32) {
+    let state = game.npcs[index].queen_chamber_state();
     (
-        game.npcs[index].chamber_radius_x.unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
-        game.npcs[index].chamber_radius_y.unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
+        state.radius_x.unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
+        state.radius_y.unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS),
     )
 }
 
@@ -239,25 +245,28 @@ fn update_growth_state(game: &mut GameState, index: usize, pos: Position, ring: 
     if !ring.contains(&pos) {
         return;
     }
-    match game.npcs[index].chamber_anchor {
+    let state = game.npcs[index].queen_chamber_state();
+    match state.anchor {
         None => {
-            game.npcs[index].chamber_anchor = Some(pos);
-            game.npcs[index].chamber_has_left_anchor = false;
+            game.npcs[index].set_queen_chamber_state(QueenChamberState {
+                anchor: Some(pos),
+                has_left_anchor: false,
+                ..state
+            });
         }
-        Some(anchor) if !game.npcs[index].chamber_has_left_anchor && pos != anchor => {
-            game.npcs[index].chamber_has_left_anchor = true;
+        Some(anchor) if !state.has_left_anchor && pos != anchor => {
+            game.npcs[index].set_queen_chamber_state(QueenChamberState {
+                has_left_anchor: true,
+                ..state
+            });
         }
-        Some(anchor) if game.npcs[index].chamber_has_left_anchor && pos == anchor => {
+        Some(anchor) if state.has_left_anchor && pos == anchor => {
             let (max_x, max_y) = game.queen_chamber_max_radii();
             let min_x = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_x);
             let min_y = INITIAL_QUEEN_CHAMBER_RADIUS.min(max_y);
-            let current_x = game.npcs[index]
-                .chamber_radius_x
-                .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
-            let current_y = game.npcs[index]
-                .chamber_radius_y
-                .unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
-            let (next_x, next_y) = match game.npcs[index].chamber_growth_mode {
+            let current_x = state.radius_x.unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
+            let current_y = state.radius_y.unwrap_or(INITIAL_QUEEN_CHAMBER_RADIUS);
+            let (next_x, next_y) = match state.growth_mode {
                 QueenChamberGrowthMode::Outward => {
                     ((current_x + 1).min(max_x), (current_y + 1).min(max_y))
                 }
@@ -265,10 +274,13 @@ fn update_growth_state(game: &mut GameState, index: usize, pos: Position, ring: 
                     ((current_x - 1).max(min_x), (current_y - 1).max(min_y))
                 }
             };
-            game.npcs[index].chamber_radius_x = Some(next_x);
-            game.npcs[index].chamber_radius_y = Some(next_y);
-            game.npcs[index].chamber_anchor = None;
-            game.npcs[index].chamber_has_left_anchor = false;
+            game.npcs[index].set_queen_chamber_state(QueenChamberState {
+                radius_x: Some(next_x),
+                radius_y: Some(next_y),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: state.growth_mode,
+            });
             game.npcs[index].search_destination = None;
         }
         _ => {}

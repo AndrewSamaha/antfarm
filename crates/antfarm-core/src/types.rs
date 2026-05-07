@@ -75,6 +75,27 @@ pub enum QueenChamberGrowthMode {
     Inward,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueenChamberState {
+    pub radius_x: Option<i32>,
+    pub radius_y: Option<i32>,
+    pub anchor: Option<Position>,
+    pub has_left_anchor: bool,
+    pub growth_mode: QueenChamberGrowthMode,
+}
+
+impl Default for QueenChamberState {
+    fn default() -> Self {
+        Self {
+            radius_x: None,
+            radius_y: None,
+            anchor: None,
+            has_left_anchor: false,
+            growth_mode: QueenChamberGrowthMode::Outward,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub id: u8,
@@ -144,6 +165,26 @@ pub struct NpcAnt {
     pub chamber_has_left_anchor: bool,
     #[serde(default)]
     pub chamber_growth_mode: QueenChamberGrowthMode,
+}
+
+impl NpcAnt {
+    pub fn queen_chamber_state(&self) -> QueenChamberState {
+        QueenChamberState {
+            radius_x: self.chamber_radius_x,
+            radius_y: self.chamber_radius_y,
+            anchor: self.chamber_anchor,
+            has_left_anchor: self.chamber_has_left_anchor,
+            growth_mode: self.chamber_growth_mode,
+        }
+    }
+
+    pub fn set_queen_chamber_state(&mut self, state: QueenChamberState) {
+        self.chamber_radius_x = state.radius_x;
+        self.chamber_radius_y = state.radius_y;
+        self.chamber_anchor = state.anchor;
+        self.chamber_has_left_anchor = state.has_left_anchor;
+        self.chamber_growth_mode = state.growth_mode;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
