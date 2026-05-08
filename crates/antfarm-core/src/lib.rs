@@ -10,6 +10,7 @@ mod npc_debug;
 mod pheromones;
 mod protocol;
 mod replay;
+mod role_helpers;
 mod types;
 mod world;
 

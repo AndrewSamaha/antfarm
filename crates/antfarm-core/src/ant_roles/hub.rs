@@ -4,9 +4,11 @@ use crate::{
     NpcDebugEvent, SURFACE_Y,
     game_state::GameState,
     pheromones::PheromoneChannel,
+    role_helpers::orbit::{choose_clockwise_ring_step, perimeter},
     types::{HubState, Position, Tile},
 };
 
+const INITIAL_HUB_ORBIT_RADIUS: i32 = 1;
 const HUB_PHEROMONE_RADIUS: i32 = 60;
 const HUB_PHEROMONE_PEAK: u8 = 240;
 
@@ -80,11 +82,7 @@ pub(crate) fn tick(
             }
         }
         HubPlanStep::HoldAtHub => {
-            if state.has_hub_location
-                && game.npcs[index].pos != state.hub_center
-            {
-                let _ = tick_toward(game, index, state.hub_center, true, true, false, events);
-            }
+            tick_hold_at_hub(game, index, &mut state, events);
             false
         }
     };
@@ -98,13 +96,16 @@ pub(crate) fn tick(
 
 pub(crate) fn on_hatch(game: &mut GameState, index: usize) {
     let origin = game.npcs[index].pos;
+    let plan = configured_plan(&game.config);
+    let hub_center = derive_hub_center(origin, &plan).unwrap_or(origin);
     let worker = &mut game.npcs[index];
     worker.set_hub_state(HubState {
         origin,
-        hub_center: origin,
+        hub_center,
         has_hub_location: false,
         step_index: 0,
         current_target: None,
+        ..HubState::default()
     });
 }
 
@@ -180,6 +181,15 @@ fn configured_plan(config: &Value) -> Vec<HubPlanStep> {
     }
 }
 
+fn orbit_max_radius(config: &Value) -> i32 {
+    config
+        .pointer("/colony/roles/hive_maintenance/hub/orbit_max_radius")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(9)
+        .max(INITIAL_HUB_ORBIT_RADIUS)
+}
+
 fn default_plan() -> Vec<HubPlanStep> {
     vec![
         HubPlanStep::MoveRelative {
@@ -197,6 +207,102 @@ fn default_plan() -> Vec<HubPlanStep> {
         HubPlanStep::MoveToHub,
         HubPlanStep::HoldAtHub,
     ]
+}
+
+fn derive_hub_center(origin: Position, plan: &[HubPlanStep]) -> Option<Position> {
+    let mut cursor = origin;
+    for step in plan {
+        match step {
+            HubPlanStep::MoveRelative { x, y, .. } => {
+                cursor = cursor.offset(*x, *y);
+            }
+            HubPlanStep::SetHubLocation => return Some(cursor),
+            HubPlanStep::MoveToSurface { .. }
+            | HubPlanStep::MoveToHub
+            | HubPlanStep::HoldAtHub => return Some(cursor),
+        }
+    }
+    None
+}
+
+fn tick_hold_at_hub(game: &mut GameState, index: usize, state: &mut HubState, events: &mut Vec<String>) {
+    if !state.has_hub_location {
+        return;
+    }
+
+    if state.orbit_returning_to_center {
+        let _ = tick_toward(game, index, state.hub_center, true, true, true, events);
+        return;
+    }
+
+    ensure_orbit_radius_initialized(state);
+    let radius = state.orbit_radius.unwrap_or(INITIAL_HUB_ORBIT_RADIUS);
+    let ring = perimeter(
+        state.hub_center,
+        radius,
+        radius,
+        game.world.width(),
+        game.world.height(),
+    );
+    if ring.is_empty() {
+        state.orbit_returning_to_center = true;
+        return;
+    }
+
+    let pos = game.npcs[index].pos;
+    if ring.contains(&pos) {
+        update_hub_orbit_growth(state, pos, &ring, orbit_max_radius(&game.config));
+        if state.orbit_returning_to_center {
+            game.npcs[index].search_destination = None;
+            return;
+        }
+    }
+
+    let radius = state.orbit_radius.unwrap_or(INITIAL_HUB_ORBIT_RADIUS);
+    let ring = perimeter(
+        state.hub_center,
+        radius,
+        radius,
+        game.world.width(),
+        game.world.height(),
+    );
+    if let Some(next) = choose_clockwise_ring_step(game, index, state.hub_center, &ring) {
+        move_or_dig(game, index, next, true, events);
+    }
+}
+
+fn ensure_orbit_radius_initialized(state: &mut HubState) {
+    if state.orbit_radius.is_none() {
+        state.orbit_radius = Some(INITIAL_HUB_ORBIT_RADIUS);
+    }
+}
+
+fn update_hub_orbit_growth(state: &mut HubState, pos: Position, ring: &[Position], max_radius: i32) {
+    if !ring.contains(&pos) {
+        return;
+    }
+    match state.orbit_anchor {
+        None => {
+            state.orbit_anchor = Some(pos);
+            state.orbit_has_left_anchor = false;
+        }
+        Some(anchor) if !state.orbit_has_left_anchor && pos != anchor => {
+            state.orbit_has_left_anchor = true;
+        }
+        Some(anchor) if state.orbit_has_left_anchor && pos == anchor => {
+            let current_radius = state.orbit_radius.unwrap_or(INITIAL_HUB_ORBIT_RADIUS);
+            if current_radius < max_radius {
+                state.orbit_radius = Some(current_radius + 1);
+                state.orbit_anchor = None;
+                state.orbit_has_left_anchor = false;
+            } else {
+                state.orbit_returning_to_center = true;
+                state.orbit_anchor = None;
+                state.orbit_has_left_anchor = false;
+            }
+        }
+        _ => {}
+    }
 }
 
 fn tick_toward(

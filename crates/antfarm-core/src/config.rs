@@ -40,6 +40,7 @@ fn default_config() -> Value {
                     "hub": {
                         "lifespan": 2000,
                         "max": 1,
+                        "orbit_max_radius": 9,
                         "plan": [
                             { "move_relative": { "x": 50, "y": 50, "dig": true } },
                             { "move_relative": { "x": 10, "y": 0, "dig": true } },

@@ -629,7 +629,22 @@ mod tests {
         });
         set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
             .expect("set queen laying cooldown");
+        set_config_path(
+            &mut config,
+            "colony.roles.hive_maintenance.hub.plan",
+            json!([
+                { "move_relative": { "x": 4, "y": 4, "dig": true } },
+                { "move_relative": { "x": 2, "y": 0, "dig": true } },
+                { "set_hub_location": true },
+                { "move_to_surface": { "dig": true } },
+                { "move_to_hub": true },
+                { "hold_at_hub": true }
+            ]),
+        )
+        .expect("set smaller hub plan for test");
         let mut game = GameState::from_config(config);
+        game.set_config_value("colony.roles.hive_maintenance.hub.orbit_max_radius", json!(3))
+            .expect("set smaller hub orbit radius for test");
         seed_test_colony(&mut game);
         game.set_queen_eggs(4).expect("seed four eggs");
 
@@ -653,7 +668,7 @@ mod tests {
         assert_eq!(hub_workers.len(), 1);
 
         let hub_id = hub_workers[0].id;
-        for _ in 0..400 {
+        for _ in 0..500 {
             game.tick();
         }
 
@@ -666,6 +681,8 @@ mod tests {
         assert_eq!(hub_worker.pos, hub_state.hub_center);
         assert!(hub_state.has_hub_location);
         assert_eq!(usize::from(hub_state.step_index), 5);
+        assert_eq!(hub_state.orbit_radius, Some(3));
+        assert!(hub_state.orbit_returning_to_center || hub_worker.pos == hub_state.hub_center);
 
         let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
         assert!(

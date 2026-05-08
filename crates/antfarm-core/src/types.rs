@@ -106,6 +106,14 @@ pub struct HubState {
     pub step_index: u16,
     #[serde(default)]
     pub current_target: Option<Position>,
+    #[serde(default)]
+    pub orbit_radius: Option<i32>,
+    #[serde(default)]
+    pub orbit_anchor: Option<Position>,
+    #[serde(default)]
+    pub orbit_has_left_anchor: bool,
+    #[serde(default)]
+    pub orbit_returning_to_center: bool,
 }
 
 impl Default for HubState {
@@ -116,6 +124,10 @@ impl Default for HubState {
             has_hub_location: false,
             step_index: 0,
             current_target: None,
+            orbit_radius: None,
+            orbit_anchor: None,
+            orbit_has_left_anchor: false,
+            orbit_returning_to_center: false,
         }
     }
 }
