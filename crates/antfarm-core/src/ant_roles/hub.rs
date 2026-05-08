@@ -1,15 +1,23 @@
+use serde_json::Value;
+
 use crate::{
     NpcDebugEvent, SURFACE_Y,
     game_state::GameState,
     pheromones::PheromoneChannel,
-    types::{HubPhase, HubState, Position, Tile},
+    types::{HubState, Position, Tile},
 };
 
-const HUB_DIAGONAL_X_OFFSET: i32 = 50;
-const HUB_DIAGONAL_Y_OFFSET: i32 = 50;
-const HUB_RIGHT_SPUR_OFFSET: i32 = 10;
 const HUB_PHEROMONE_RADIUS: i32 = 60;
 const HUB_PHEROMONE_PEAK: u8 = 240;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HubPlanStep {
+    MoveRelative { x: i32, y: i32, dig: bool },
+    SetHubLocation,
+    MoveToSurface { dig: bool },
+    MoveToHub,
+    HoldAtHub,
+}
 
 pub(crate) fn tick(
     game: &mut GameState,
@@ -17,76 +25,178 @@ pub(crate) fn tick(
     _queen_pos: Option<Position>,
     events: &mut Vec<String>,
 ) {
-    let Some(state) = game.npcs[index].hub_state() else {
-        game.set_worker_idle(index);
-        return;
+    let mut state = match game.npcs[index].hub_state() {
+        Some(state) => state,
+        None => {
+            game.set_worker_idle(index);
+            return;
+        }
     };
+    let plan = configured_plan(&game.config);
 
-    if matches!(state.phase, HubPhase::DigToSurface | HubPhase::ReturnToHub | HubPhase::HoldAtHub)
+    if state.has_hub_location
         && let Some(hive_id) = game.npcs[index].hive_id
     {
         emit_hub_pheromone(game, hive_id, state.hub_center);
     }
 
     game.set_worker_idle(index);
-    match state.phase {
-        HubPhase::DigToHub => {
-            if tick_toward(game, index, diagonal_target(state), true, true, events) {
-                advance_phase(game, index, HubPhase::DigRightSpur);
-            }
-        }
-        HubPhase::DigRightSpur => {
-            if tick_toward(game, index, state.hub_center, false, true, events) {
-                advance_phase(game, index, HubPhase::DigToSurface);
-            }
-        }
-        HubPhase::DigToSurface => {
-            if tick_toward(game, index, state.surface_entry, true, false, events) {
-                advance_phase(game, index, HubPhase::ReturnToHub);
-            }
-        }
-        HubPhase::ReturnToHub => {
-            if tick_toward(game, index, state.hub_center, true, false, events) {
-                advance_phase(game, index, HubPhase::HoldAtHub);
-            }
-        }
-        HubPhase::HoldAtHub => {
-            if game.npcs[index].pos != state.hub_center
-                && !game.npc_blocks_movement(state.hub_center, index)
-            {
-                game.npcs[index].pos = state.hub_center;
-                game.remember_recent_position(index, state.hub_center);
-                game.mark_npcs_dirty();
-            }
-        }
+
+    if usize::from(state.step_index) >= plan.len() {
+        game.npcs[index].set_hub_state(state);
+        return;
     }
+
+    let completed = match plan[usize::from(state.step_index)] {
+        HubPlanStep::MoveRelative { x, y, dig } => {
+            let target = state.current_target.unwrap_or_else(|| {
+                let pos = game.npcs[index].pos;
+                pos.offset(x, y)
+            });
+            state.current_target = Some(target);
+            tick_toward(game, index, target, true, true, dig, events)
+        }
+        HubPlanStep::SetHubLocation => {
+            let pos = game.npcs[index].pos;
+            state.hub_center = pos;
+            state.has_hub_location = true;
+            state.current_target = None;
+            true
+        }
+        HubPlanStep::MoveToSurface { dig } => {
+            let target = state.current_target.unwrap_or_else(|| Position {
+                x: game.npcs[index].pos.x,
+                y: SURFACE_Y + 1,
+            });
+            state.current_target = Some(target);
+            tick_toward(game, index, target, true, false, dig, events)
+        }
+        HubPlanStep::MoveToHub => {
+            if !state.has_hub_location {
+                false
+            } else {
+                state.current_target = Some(state.hub_center);
+                tick_toward(game, index, state.hub_center, true, true, false, events)
+            }
+        }
+        HubPlanStep::HoldAtHub => {
+            if state.has_hub_location
+                && game.npcs[index].pos != state.hub_center
+            {
+                let _ = tick_toward(game, index, state.hub_center, true, true, false, events);
+            }
+            false
+        }
+    };
+
+    if completed {
+        state.step_index = state.step_index.saturating_add(1);
+        state.current_target = None;
+    }
+    game.npcs[index].set_hub_state(state);
 }
 
 pub(crate) fn on_hatch(game: &mut GameState, index: usize) {
     let origin = game.npcs[index].pos;
-    let hub_center = Position {
-        x: origin.x + HUB_DIAGONAL_X_OFFSET + HUB_RIGHT_SPUR_OFFSET,
-        y: origin.y + HUB_DIAGONAL_Y_OFFSET,
-    };
-    let surface_entry = Position {
-        x: hub_center.x,
-        y: SURFACE_Y + 1,
-    };
     let worker = &mut game.npcs[index];
     worker.set_hub_state(HubState {
         origin,
-        hub_center,
-        surface_entry,
-        phase: HubPhase::DigToHub,
+        hub_center: origin,
+        has_hub_location: false,
+        step_index: 0,
+        current_target: None,
     });
 }
 
-fn advance_phase(game: &mut GameState, index: usize, phase: HubPhase) {
-    let Some(mut state) = game.npcs[index].hub_state() else {
-        return;
+fn configured_plan(config: &Value) -> Vec<HubPlanStep> {
+    let Some(items) = config
+        .pointer("/colony/roles/hive_maintenance/hub/plan")
+        .and_then(Value::as_array)
+    else {
+        return default_plan();
     };
-    state.phase = phase;
-    game.npcs[index].set_hub_state(state);
+
+    let mut steps = Vec::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        if let Some(move_relative) = object.get("move_relative").and_then(Value::as_object) {
+            let x = move_relative
+                .get("x")
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+                .unwrap_or(0);
+            let y = move_relative
+                .get("y")
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+                .unwrap_or(0);
+            let dig = move_relative
+                .get("dig")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            steps.push(HubPlanStep::MoveRelative { x, y, dig });
+            continue;
+        }
+        if object
+            .get("set_hub_location")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            steps.push(HubPlanStep::SetHubLocation);
+            continue;
+        }
+        if let Some(move_to_surface) = object.get("move_to_surface") {
+            let dig = move_to_surface
+                .as_object()
+                .and_then(|value| value.get("dig"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            steps.push(HubPlanStep::MoveToSurface { dig });
+            continue;
+        }
+        if object
+            .get("move_to_hub")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            steps.push(HubPlanStep::MoveToHub);
+            continue;
+        }
+        if object
+            .get("hold_at_hub")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            steps.push(HubPlanStep::HoldAtHub);
+        }
+    }
+
+    if steps.is_empty() {
+        default_plan()
+    } else {
+        steps
+    }
+}
+
+fn default_plan() -> Vec<HubPlanStep> {
+    vec![
+        HubPlanStep::MoveRelative {
+            x: 50,
+            y: 50,
+            dig: true,
+        },
+        HubPlanStep::MoveRelative {
+            x: 10,
+            y: 0,
+            dig: true,
+        },
+        HubPlanStep::SetHubLocation,
+        HubPlanStep::MoveToSurface { dig: true },
+        HubPlanStep::MoveToHub,
+        HubPlanStep::HoldAtHub,
+    ]
 }
 
 fn tick_toward(
@@ -95,6 +205,7 @@ fn tick_toward(
     target: Position,
     allow_vertical: bool,
     allow_horizontal: bool,
+    dig: bool,
     events: &mut Vec<String>,
 ) -> bool {
     let pos = game.npcs[index].pos;
@@ -106,7 +217,7 @@ fn tick_toward(
     let Some(next) = next else {
         return true;
     };
-    move_or_dig(game, index, next, events);
+    move_or_dig(game, index, next, dig, events);
     game.npcs[index].pos == target
 }
 
@@ -127,7 +238,13 @@ fn next_step(
     None
 }
 
-fn move_or_dig(game: &mut GameState, index: usize, next: Position, events: &mut Vec<String>) {
+fn move_or_dig(
+    game: &mut GameState,
+    index: usize,
+    next: Position,
+    dig: bool,
+    events: &mut Vec<String>,
+) {
     if !game.world.in_bounds(next) || game.npc_blocks_movement(next, index) {
         return;
     }
@@ -137,9 +254,12 @@ fn move_or_dig(game: &mut GameState, index: usize, next: Position, events: &mut 
     if matches!(tile, Tile::Bedrock) {
         return;
     }
+    if !dig && !matches!(tile, Tile::Empty) {
+        return;
+    }
 
     let npc_pos = game.npcs[index].pos;
-    if !matches!(tile, Tile::Empty) {
+    if dig && !matches!(tile, Tile::Empty) {
         game.set_world_tile(next, Tile::Empty);
         events.push(format!(
             "NPC ant {} dug hub tunnel at {},{}",
@@ -160,13 +280,6 @@ fn move_or_dig(game: &mut GameState, index: usize, next: Position, events: &mut 
     game.npcs[index].pos = next;
     game.remember_recent_position(index, next);
     game.mark_npcs_dirty();
-}
-
-fn diagonal_target(state: HubState) -> Position {
-    Position {
-        x: state.origin.x + HUB_DIAGONAL_X_OFFSET,
-        y: state.origin.y + HUB_DIAGONAL_Y_OFFSET,
-    }
 }
 
 fn emit_hub_pheromone(game: &mut GameState, hive_id: u16, center: Position) {

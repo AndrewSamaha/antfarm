@@ -40,6 +40,14 @@ fn default_config() -> Value {
                     "hub": {
                         "lifespan": 2000,
                         "max": 1,
+                        "plan": [
+                            { "move_relative": { "x": 50, "y": 50, "dig": true } },
+                            { "move_relative": { "x": 10, "y": 0, "dig": true } },
+                            { "set_hub_location": true },
+                            { "move_to_surface": { "dig": true } },
+                            { "move_to_hub": true },
+                            { "hold_at_hub": true }
+                        ],
                         "weight": 1
                     },
                     "queen_chamber": {

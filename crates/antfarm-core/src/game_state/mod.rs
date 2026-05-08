@@ -664,7 +664,8 @@ mod tests {
             .expect("hub worker should still exist");
         let hub_state = hub_worker.hub_state().expect("hub state should exist");
         assert_eq!(hub_worker.pos, hub_state.hub_center);
-        assert_eq!(hub_state.phase, crate::types::HubPhase::HoldAtHub);
+        assert!(hub_state.has_hub_location);
+        assert_eq!(usize::from(hub_state.step_index), 5);
 
         let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
         assert!(

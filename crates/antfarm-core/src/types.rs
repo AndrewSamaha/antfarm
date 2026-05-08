@@ -96,24 +96,16 @@ impl Default for QueenChamberState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum HubPhase {
-    #[default]
-    DigToHub,
-    DigRightSpur,
-    DigToSurface,
-    ReturnToHub,
-    HoldAtHub,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubState {
     pub origin: Position,
     pub hub_center: Position,
-    pub surface_entry: Position,
     #[serde(default)]
-    pub phase: HubPhase,
+    pub has_hub_location: bool,
+    #[serde(default)]
+    pub step_index: u16,
+    #[serde(default)]
+    pub current_target: Option<Position>,
 }
 
 impl Default for HubState {
@@ -121,8 +113,9 @@ impl Default for HubState {
         Self {
             origin: Position { x: 0, y: 0 },
             hub_center: Position { x: 0, y: 0 },
-            surface_entry: Position { x: 0, y: 0 },
-            phase: HubPhase::DigToHub,
+            has_hub_location: false,
+            step_index: 0,
+            current_target: None,
         }
     }
 }
