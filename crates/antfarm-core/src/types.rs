@@ -216,6 +216,10 @@ pub struct NpcAnt {
     #[serde(default)]
     pub search_destination_stuck_ticks: u8,
     #[serde(default)]
+    pub search_opened_tile: Option<Position>,
+    #[serde(default)]
+    pub search_refill_tile: Option<Position>,
+    #[serde(default)]
     pub has_delivered_food: bool,
     #[serde(default)]
     pub last_dirt_place_tick: Option<u64>,
@@ -372,6 +376,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,

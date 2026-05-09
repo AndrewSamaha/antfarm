@@ -908,6 +908,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1027,6 +1029,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1114,6 +1118,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1204,6 +1210,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1288,6 +1296,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1366,6 +1376,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1396,6 +1408,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -1412,6 +1426,245 @@ mod tests {
             .find(|npc| npc.id == mover_id)
             .expect("mover should still exist");
         assert_eq!(mover.pos, blocker_pos);
+    }
+
+    #[test]
+    fn searching_food_gatherers_refill_self_opened_tunnel_tiles_after_moving_off_them() {
+        let mut config = json!({
+            "world": { "seed": 41 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "search_behavior_profile": "outward_bias_v1"
+            }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open search corridor area");
+        if let Some(queen_mut) = game
+            .npcs
+            .iter_mut()
+            .find(|npc| npc.kind == NpcKind::Queen && npc.id == queen.id)
+        {
+            queen_mut.food = 0;
+        }
+
+        let start = Position {
+            x: queen.pos.x + 10,
+            y: queen.pos.y,
+        };
+        let first_dug = start.offset(1, 0);
+        let second_dug = start.offset(2, 0);
+        game.set_world_tile(first_dug, Tile::Dirt);
+        game.set_world_tile(second_dug, Tile::Dirt);
+        game.set_world_tile(start.offset(-1, 0), Tile::Stone);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, -1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, 1), Tile::Stone);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 0,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            start
+        );
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Empty));
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+        assert_eq!(game.world.tile(start), Some(Tile::Empty));
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
+
+        game.tick();
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, second_dug);
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Dirt));
+        assert_eq!(game.world.tile(start), Some(Tile::Empty));
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
+    }
+
+    #[test]
+    fn returning_food_gatherers_do_not_refill_tunnel_tiles_after_moving_off_them() {
+        let mut config = json!({
+            "world": { "seed": 43 },
+            "colony": { "ambient_worker_count": 0 }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open return corridor area");
+        if let Some(queen_mut) = game
+            .npcs
+            .iter_mut()
+            .find(|npc| npc.kind == NpcKind::Queen && npc.id == queen.id)
+        {
+            queen_mut.food = 0;
+        }
+
+        let start = Position {
+            x: queen.pos.x - 10,
+            y: queen.pos.y,
+        };
+        let first_dug = start.offset(1, 0);
+        let second_dug = start.offset(2, 0);
+        game.set_world_tile(first_dug, Tile::Dirt);
+        game.set_world_tile(second_dug, Tile::Dirt);
+        game.set_world_tile(start.offset(-1, 0), Tile::Stone);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, -1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, 1), Tile::Stone);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 1,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::ReturningFood,
+            carrying_food: true,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            start
+        );
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Empty));
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
+
+        game.tick();
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, second_dug);
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Empty));
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
     }
 
     fn is_on_queen_chamber_oval_perimeter(
@@ -1554,6 +1807,8 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,

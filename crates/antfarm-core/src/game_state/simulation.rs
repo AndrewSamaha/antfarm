@@ -177,6 +177,8 @@ impl GameState {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
@@ -239,6 +241,8 @@ impl GameState {
             egg.recent_positions.clear();
             egg.search_destination = None;
             egg.search_destination_stuck_ticks = 0;
+            egg.search_opened_tile = None;
+            egg.search_refill_tile = None;
             egg.has_delivered_food = false;
             egg.role = assigned_role.clone();
             egg.clear_role_state();
@@ -577,6 +581,8 @@ impl GameState {
         self.npcs[worker_index].recent_positions.clear();
         self.npcs[worker_index].search_destination = None;
         self.npcs[worker_index].search_destination_stuck_ticks = 0;
+        self.npcs[worker_index].search_opened_tile = None;
+        self.npcs[worker_index].search_refill_tile = None;
         self.npcs[worker_index].has_delivered_food = true;
         self.delivered_food_count = self
             .delivered_food_count
@@ -938,6 +944,35 @@ impl GameState {
                 .search_destination_stuck_ticks
                 .saturating_add(1);
         }
+    }
+
+    pub(crate) fn note_search_opened_tile(&mut self, index: usize, pos: Position) {
+        self.npcs[index].search_opened_tile = Some(pos);
+    }
+
+    pub(crate) fn clear_search_tunnel_memory(&mut self, index: usize) {
+        self.npcs[index].search_opened_tile = None;
+        self.npcs[index].search_refill_tile = None;
+    }
+
+    pub(crate) fn finish_search_move(&mut self, index: usize, from: Position, to: Position) {
+        let should_refill = self.npcs[index].search_refill_tile == Some(from);
+        let moved_into_opened_tile = self.npcs[index].search_opened_tile == Some(to);
+
+        if should_refill && self.can_restore_search_tunnel_tile(index, from) {
+            self.set_world_tile(from, Tile::Dirt);
+        }
+
+        self.npcs[index].search_refill_tile = moved_into_opened_tile.then_some(to);
+        self.npcs[index].search_opened_tile = None;
+    }
+
+    fn can_restore_search_tunnel_tile(&self, index: usize, pos: Position) -> bool {
+        self.world.in_bounds(pos)
+            && self.world.tile(pos) == Some(Tile::Empty)
+            && !self.players.values().any(|player| player.pos == pos)
+            && !self.npc_occupied(pos, Some(index))
+            && !self.art_occupies_cell(pos)
     }
 
     pub(crate) fn local_neighborhood_snapshot(&self, origin: Position, hive_id: u16) -> Value {

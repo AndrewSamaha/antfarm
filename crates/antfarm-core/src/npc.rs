@@ -41,6 +41,8 @@ pub(crate) fn default_npcs_with_count(world: &World, count: u16) -> Vec<NpcAnt> 
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,

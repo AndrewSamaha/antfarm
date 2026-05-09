@@ -333,6 +333,9 @@ pub(crate) fn tick(
                     game.npcs[index].carrying_food_ticks =
                         game.npcs[index].carrying_food_ticks.saturating_add(1);
                 }
+                if matches!(behavior, AntBehaviorState::Searching) {
+                    game.finish_search_move(index, npc_pos, next);
+                }
                 game.remember_recent_position(index, next);
                 game.update_search_destination_progress(index, npc_pos, Some(next));
                 game.mark_npcs_dirty();
@@ -343,6 +346,9 @@ pub(crate) fn tick(
             Some(Tile::Food) if !matches!(behavior, AntBehaviorState::ReturningFood) => {
                 game.set_world_tile(next, Tile::Empty);
                 game.npcs[index].pos = next;
+                if matches!(behavior, AntBehaviorState::Searching) {
+                    game.finish_search_move(index, npc_pos, next);
+                }
                 let lifespan_bonus =
                     worker_lifespan_bonus(game.npcs[index].age_ticks, game.worker_lifespan_ticks_for(index));
                 game.npcs[index].age_ticks = game.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
@@ -363,6 +369,7 @@ pub(crate) fn tick(
                 game.npcs[index].recent_positions.clear();
                 game.npcs[index].search_destination = None;
                 game.npcs[index].search_destination_stuck_ticks = 0;
+                game.clear_search_tunnel_memory(index);
                 game.found_food_count = game.found_food_count.saturating_add(1);
                 game.mark_npcs_dirty();
                 events.push(format!("NPC ant {} found food", npc_id));
@@ -398,6 +405,9 @@ pub(crate) fn tick(
                     _ => {}
                 }
                 game.set_world_tile(next, Tile::Empty);
+                if matches!(behavior, AntBehaviorState::Searching) {
+                    game.note_search_opened_tile(index, next);
+                }
                 events.push(format!("NPC ant {} tunneled at {},{}", npc_id, next.x, next.y));
                 game.update_search_destination_progress(index, npc_pos, None);
                 outcome = "tunneled".to_string();
