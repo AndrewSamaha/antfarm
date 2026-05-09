@@ -7,6 +7,8 @@ pub enum PheromoneChannel {
     Home,
     Food,
     Hub,
+    QueenChamberTunnel,
+    EntryTunnel,
     Threat,
     Defense,
 }
@@ -26,6 +28,8 @@ pub struct HivePheromone {
     pub home: u8,
     pub food: u8,
     pub hub: u8,
+    pub queen_chamber_tunnel: u8,
+    pub entry_tunnel: u8,
     pub threat: u8,
     pub defense: u8,
 }
@@ -145,6 +149,8 @@ impl PheromoneGrid {
                 entry.home = entry.home.saturating_sub(amount);
                 entry.food = entry.food.saturating_sub(amount);
                 entry.hub = entry.hub.saturating_sub(amount);
+                entry.queen_chamber_tunnel = entry.queen_chamber_tunnel.saturating_sub(amount);
+                entry.entry_tunnel = entry.entry_tunnel.saturating_sub(amount);
                 entry.threat = entry.threat.saturating_sub(amount);
                 entry.defense = entry.defense.saturating_sub(amount);
             }
@@ -152,6 +158,8 @@ impl PheromoneGrid {
                 entry.home > 0
                     || entry.food > 0
                     || entry.hub > 0
+                    || entry.queen_chamber_tunnel > 0
+                    || entry.entry_tunnel > 0
                     || entry.threat > 0
                     || entry.defense > 0
             });
@@ -190,6 +198,8 @@ fn channel_value(entry: &HivePheromone, channel: PheromoneChannel) -> u8 {
         PheromoneChannel::Home => entry.home,
         PheromoneChannel::Food => entry.food,
         PheromoneChannel::Hub => entry.hub,
+        PheromoneChannel::QueenChamberTunnel => entry.queen_chamber_tunnel,
+        PheromoneChannel::EntryTunnel => entry.entry_tunnel,
         PheromoneChannel::Threat => entry.threat,
         PheromoneChannel::Defense => entry.defense,
     }
@@ -200,6 +210,8 @@ fn channel_value_mut(entry: &mut HivePheromone, channel: PheromoneChannel) -> &m
         PheromoneChannel::Home => &mut entry.home,
         PheromoneChannel::Food => &mut entry.food,
         PheromoneChannel::Hub => &mut entry.hub,
+        PheromoneChannel::QueenChamberTunnel => &mut entry.queen_chamber_tunnel,
+        PheromoneChannel::EntryTunnel => &mut entry.entry_tunnel,
         PheromoneChannel::Threat => &mut entry.threat,
         PheromoneChannel::Defense => &mut entry.defense,
     }

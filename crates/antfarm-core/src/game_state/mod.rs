@@ -704,6 +704,144 @@ mod tests {
     }
 
     #[test]
+    fn hub_plan_pheromone_trails_start_and_stop_in_the_expected_phases() {
+        let mut config = json!({
+            "world": { "seed": 17 },
+            "soil": { "settle_frequency": 0.0 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "minimum_delay_to_hatch": 1,
+                "roles": {
+                    "food_gatherer": {
+                        "weight": 0,
+                        "max": 0
+                    },
+                    "hive_maintenance": {
+                        "hub": {
+                            "weight": 1,
+                            "max": 1,
+                            "plan": [
+                                { "begin_pheromone_trail": { "pheromone": "queen_chamber_tunnel", "initial_value": 5, "change_on_step": -1 } },
+                                { "move_relative": { "x": 0, "y": 3, "dig": true } },
+                                { "set_hub_location": true },
+                                { "end_pheromone_trail": "queen_chamber_tunnel" },
+                                { "move_to_surface": { "dig": true } },
+                                { "begin_pheromone_trail": { "pheromone": "entry_tunnel", "initial_value": 5, "change_on_step": -1 } },
+                                { "move_to_hub": true },
+                                { "end_pheromone_trail": "entry_tunnel" },
+                                { "hold_at_hub": true }
+                            ]
+                        },
+                        "queen_chamber": {
+                            "weight": 0
+                        }
+                    }
+                }
+            }
+        });
+        set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
+            .expect("set queen laying cooldown");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        game.set_queen_eggs(1).expect("seed one egg");
+
+        while game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker && npc.hive_id.is_some())
+            .count()
+            < 1
+        {
+            game.tick();
+        }
+
+        let hub_worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Worker)
+            .cloned()
+            .expect("hub worker should exist");
+        let hub_id = hub_worker.id;
+        let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
+
+        while game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .and_then(|npc| npc.hub_state())
+            .expect("hub state should exist")
+            .step_index
+            < 4
+        {
+            game.tick();
+        }
+
+        let hub_state = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .and_then(|npc| npc.hub_state())
+            .expect("hub state should exist");
+        let queen_tunnel_first_step = hub_state.origin.offset(0, 1);
+
+        let queen_tunnel_start_value = game.pheromones.value(
+            queen_tunnel_first_step,
+            hive_id,
+            PheromoneChannel::QueenChamberTunnel,
+        );
+        let queen_tunnel_hub_value = game.pheromones.value(
+            hub_state.hub_center,
+            hive_id,
+            PheromoneChannel::QueenChamberTunnel,
+        );
+        assert!(queen_tunnel_start_value > 0);
+        assert!(queen_tunnel_hub_value > 0);
+        assert!(queen_tunnel_start_value >= queen_tunnel_hub_value);
+
+        while game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .and_then(|npc| npc.hub_state())
+            .expect("hub state should exist")
+            .step_index
+            < 6
+        {
+            game.tick();
+        }
+
+        let surface_pos = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .map(|npc| npc.pos)
+            .expect("hub worker should still exist");
+        assert_eq!(surface_pos.y, SURFACE_Y + 1);
+        assert_eq!(
+            game.pheromones
+                .value(surface_pos, hive_id, PheromoneChannel::EntryTunnel),
+            0
+        );
+
+        game.tick();
+
+        let first_entry_tunnel_step = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .map(|npc| npc.pos)
+            .expect("hub worker should still exist");
+        assert_eq!(first_entry_tunnel_step.y, SURFACE_Y + 2);
+        assert!(
+            game.pheromones.value(
+                first_entry_tunnel_step,
+                hive_id,
+                PheromoneChannel::EntryTunnel
+            ) > 0
+        );
+    }
+
+    #[test]
     fn queen_chamber_workers_move_out_to_the_ring() {
         let mut config = json!({
             "world": { "seed": 11 },

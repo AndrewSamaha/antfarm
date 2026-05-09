@@ -5,7 +5,7 @@ use crate::{
     game_state::GameState,
     pheromones::PheromoneChannel,
     role_helpers::orbit::{choose_clockwise_ring_step, perimeter},
-    types::{HubState, Position, Tile},
+    types::{HubPheromoneTrail, HubState, Position, Tile},
 };
 
 const INITIAL_HUB_ORBIT_RADIUS: i32 = 1;
@@ -15,6 +15,12 @@ const HUB_PHEROMONE_PEAK: u8 = 240;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HubPlanStep {
     MoveRelative { x: i32, y: i32, dig: bool },
+    BeginPheromoneTrail {
+        channel: PheromoneChannel,
+        initial_value: u8,
+        change_on_step: i16,
+    },
+    EndPheromoneTrail { channel: PheromoneChannel },
     SetHubLocation,
     MoveToSurface { dig: bool },
     MoveToHub,
@@ -56,7 +62,28 @@ pub(crate) fn tick(
                 pos.offset(x, y)
             });
             state.current_target = Some(target);
-            tick_toward(game, index, target, true, true, dig, events)
+            tick_toward(game, index, &mut state, target, true, true, dig, events)
+        }
+        HubPlanStep::BeginPheromoneTrail {
+            channel,
+            initial_value,
+            change_on_step,
+        } => {
+            state.active_pheromone_trail = Some(HubPheromoneTrail {
+                channel,
+                next_value: initial_value,
+                change_on_step,
+            });
+            true
+        }
+        HubPlanStep::EndPheromoneTrail { channel } => {
+            if state
+                .active_pheromone_trail
+                .is_some_and(|trail| trail.channel == channel)
+            {
+                state.active_pheromone_trail = None;
+            }
+            true
         }
         HubPlanStep::SetHubLocation => {
             let pos = game.npcs[index].pos;
@@ -71,14 +98,15 @@ pub(crate) fn tick(
                 y: SURFACE_Y + 1,
             });
             state.current_target = Some(target);
-            tick_toward(game, index, target, true, false, dig, events)
+            tick_toward(game, index, &mut state, target, true, false, dig, events)
         }
         HubPlanStep::MoveToHub => {
             if !state.has_hub_location {
                 false
             } else {
-                state.current_target = Some(state.hub_center);
-                tick_toward(game, index, state.hub_center, true, true, false, events)
+                let hub_center = state.hub_center;
+                state.current_target = Some(hub_center);
+                tick_toward(game, index, &mut state, hub_center, true, true, false, events)
             }
         }
         HubPlanStep::HoldAtHub => {
@@ -140,6 +168,39 @@ fn configured_plan(config: &Value) -> Vec<HubPlanStep> {
             steps.push(HubPlanStep::MoveRelative { x, y, dig });
             continue;
         }
+        if let Some(begin) = object.get("begin_pheromone_trail").and_then(Value::as_object) {
+            let Some(channel) = begin
+                .get("pheromone")
+                .and_then(Value::as_str)
+                .and_then(parse_plan_pheromone_channel)
+            else {
+                continue;
+            };
+            let initial_value = begin
+                .get("initial_value")
+                .and_then(Value::as_i64)
+                .map(clamp_to_u8)
+                .unwrap_or(0);
+            let change_on_step = begin
+                .get("change_on_step")
+                .and_then(Value::as_i64)
+                .map(clamp_to_i16)
+                .unwrap_or(0);
+            steps.push(HubPlanStep::BeginPheromoneTrail {
+                channel,
+                initial_value,
+                change_on_step,
+            });
+            continue;
+        }
+        if let Some(channel) = object
+            .get("end_pheromone_trail")
+            .and_then(Value::as_str)
+            .and_then(parse_plan_pheromone_channel)
+        {
+            steps.push(HubPlanStep::EndPheromoneTrail { channel });
+            continue;
+        }
         if object
             .get("set_hub_location")
             .and_then(Value::as_bool)
@@ -192,6 +253,11 @@ fn orbit_max_radius(config: &Value) -> i32 {
 
 fn default_plan() -> Vec<HubPlanStep> {
     vec![
+        HubPlanStep::BeginPheromoneTrail {
+            channel: PheromoneChannel::QueenChamberTunnel,
+            initial_value: 100,
+            change_on_step: -1,
+        },
         HubPlanStep::MoveRelative {
             x: 50,
             y: 50,
@@ -203,8 +269,19 @@ fn default_plan() -> Vec<HubPlanStep> {
             dig: true,
         },
         HubPlanStep::SetHubLocation,
+        HubPlanStep::EndPheromoneTrail {
+            channel: PheromoneChannel::QueenChamberTunnel,
+        },
         HubPlanStep::MoveToSurface { dig: true },
+        HubPlanStep::BeginPheromoneTrail {
+            channel: PheromoneChannel::EntryTunnel,
+            initial_value: 100,
+            change_on_step: -1,
+        },
         HubPlanStep::MoveToHub,
+        HubPlanStep::EndPheromoneTrail {
+            channel: PheromoneChannel::EntryTunnel,
+        },
         HubPlanStep::HoldAtHub,
     ]
 }
@@ -217,6 +294,7 @@ fn derive_hub_center(origin: Position, plan: &[HubPlanStep]) -> Option<Position>
                 cursor = cursor.offset(*x, *y);
             }
             HubPlanStep::SetHubLocation => return Some(cursor),
+            HubPlanStep::BeginPheromoneTrail { .. } | HubPlanStep::EndPheromoneTrail { .. } => {}
             HubPlanStep::MoveToSurface { .. }
             | HubPlanStep::MoveToHub
             | HubPlanStep::HoldAtHub => return Some(cursor),
@@ -231,7 +309,8 @@ fn tick_hold_at_hub(game: &mut GameState, index: usize, state: &mut HubState, ev
     }
 
     if state.orbit_returning_to_center {
-        let _ = tick_toward(game, index, state.hub_center, true, true, true, events);
+        let hub_center = state.hub_center;
+        let _ = tick_toward(game, index, state, hub_center, true, true, true, events);
         return;
     }
 
@@ -267,7 +346,7 @@ fn tick_hold_at_hub(game: &mut GameState, index: usize, state: &mut HubState, ev
         game.world.height(),
     );
     if let Some(next) = choose_clockwise_ring_step(game, index, state.hub_center, &ring) {
-        move_or_dig(game, index, next, true, events);
+        move_or_dig(game, index, state, next, true, events);
     }
 }
 
@@ -308,6 +387,7 @@ fn update_hub_orbit_growth(state: &mut HubState, pos: Position, ring: &[Position
 fn tick_toward(
     game: &mut GameState,
     index: usize,
+    state: &mut HubState,
     target: Position,
     allow_vertical: bool,
     allow_horizontal: bool,
@@ -323,7 +403,7 @@ fn tick_toward(
     let Some(next) = next else {
         return true;
     };
-    move_or_dig(game, index, next, dig, events);
+    move_or_dig(game, index, state, next, dig, events);
     game.npcs[index].pos == target
 }
 
@@ -347,6 +427,7 @@ fn next_step(
 fn move_or_dig(
     game: &mut GameState,
     index: usize,
+    state: &mut HubState,
     next: Position,
     dig: bool,
     events: &mut Vec<String>,
@@ -384,8 +465,52 @@ fn move_or_dig(
         });
     }
     game.npcs[index].pos = next;
+    emit_active_trail(game, index, state, next);
     game.remember_recent_position(index, next);
     game.mark_npcs_dirty();
+}
+
+fn emit_active_trail(game: &mut GameState, index: usize, state: &mut HubState, pos: Position) {
+    let Some(hive_id) = game.npcs[index].hive_id else {
+        return;
+    };
+    let Some(mut trail) = state.active_pheromone_trail else {
+        return;
+    };
+    if trail.next_value > 0 {
+        game.pheromones
+            .deposit(pos, hive_id, trail.channel, trail.next_value);
+    }
+    trail.next_value = apply_trail_step_change(trail.next_value, trail.change_on_step);
+    state.active_pheromone_trail = Some(trail);
+}
+
+fn apply_trail_step_change(value: u8, delta: i16) -> u8 {
+    let next = i32::from(value) + i32::from(delta);
+    next.clamp(0, i32::from(u8::MAX)) as u8
+}
+
+fn parse_plan_pheromone_channel(value: &str) -> Option<PheromoneChannel> {
+    match value {
+        "home" => Some(PheromoneChannel::Home),
+        "food" => Some(PheromoneChannel::Food),
+        "hub" => Some(PheromoneChannel::Hub),
+        "queen_chamber_tunnel" | "queen_chamber_tunnel_pheromone" => {
+            Some(PheromoneChannel::QueenChamberTunnel)
+        }
+        "entry_tunnel" | "entry_tunnel_pheromone" => Some(PheromoneChannel::EntryTunnel),
+        "threat" => Some(PheromoneChannel::Threat),
+        "defense" => Some(PheromoneChannel::Defense),
+        _ => None,
+    }
+}
+
+fn clamp_to_u8(value: i64) -> u8 {
+    value.clamp(0, i64::from(u8::MAX)) as u8
+}
+
+fn clamp_to_i16(value: i64) -> i16 {
+    value.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
 }
 
 fn emit_hub_pheromone(game: &mut GameState, hive_id: u16, center: Position) {

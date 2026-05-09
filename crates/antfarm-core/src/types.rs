@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{pheromones::AntBehaviorState, world::World};
+use crate::{
+    pheromones::{AntBehaviorState, PheromoneChannel},
+    world::World,
+};
 
 pub const DEFAULT_WORKER_ROLE_PATH: &str = "food_gatherer";
 
@@ -114,6 +117,15 @@ pub struct HubState {
     pub orbit_has_left_anchor: bool,
     #[serde(default)]
     pub orbit_returning_to_center: bool,
+    #[serde(default)]
+    pub active_pheromone_trail: Option<HubPheromoneTrail>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubPheromoneTrail {
+    pub channel: PheromoneChannel,
+    pub next_value: u8,
+    pub change_on_step: i16,
 }
 
 impl Default for HubState {
@@ -128,6 +140,7 @@ impl Default for HubState {
             orbit_anchor: None,
             orbit_has_left_anchor: false,
             orbit_returning_to_center: false,
+            active_pheromone_trail: None,
         }
     }
 }
