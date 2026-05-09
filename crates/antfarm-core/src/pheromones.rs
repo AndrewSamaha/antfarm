@@ -149,8 +149,6 @@ impl PheromoneGrid {
                 entry.home = entry.home.saturating_sub(amount);
                 entry.food = entry.food.saturating_sub(amount);
                 entry.hub = entry.hub.saturating_sub(amount);
-                entry.queen_chamber_tunnel = entry.queen_chamber_tunnel.saturating_sub(amount);
-                entry.entry_tunnel = entry.entry_tunnel.saturating_sub(amount);
                 entry.threat = entry.threat.saturating_sub(amount);
                 entry.defense = entry.defense.saturating_sub(amount);
             }
