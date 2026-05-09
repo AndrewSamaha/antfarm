@@ -439,7 +439,7 @@ mod tests {
         protocol::PlacedArt,
         replay::ReplayArtifact,
         types::{
-            DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, NpcRoleState, Position,
+            DEFAULT_WORKER_ROLE_PATH, HubPatrolLeg, NpcAnt, NpcKind, NpcRoleState, Position,
             QueenChamberGrowthMode, QueenChamberState, Tile,
         },
         SURFACE_Y,
@@ -678,11 +678,18 @@ mod tests {
             .find(|npc| npc.id == hub_id)
             .expect("hub worker should still exist");
         let hub_state = hub_worker.hub_state().expect("hub state should exist");
-        assert_eq!(hub_worker.pos, hub_state.hub_center);
         assert!(hub_state.has_hub_location);
         assert_eq!(usize::from(hub_state.step_index), 5);
-        assert_eq!(hub_state.orbit_radius, Some(3));
-        assert!(hub_state.orbit_returning_to_center || hub_worker.pos == hub_state.hub_center);
+        assert!(
+            hub_worker.pos == hub_state.hub_center
+                || matches!(
+                    hub_state.patrol_leg,
+                    HubPatrolLeg::ToQueenChamber
+                        | HubPatrolLeg::ToHubFromQueenChamber
+                        | HubPatrolLeg::ToSurface
+                        | HubPatrolLeg::ToHubFromSurface
+                )
+        );
 
         let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
         assert!(

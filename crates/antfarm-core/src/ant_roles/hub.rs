@@ -1,16 +1,19 @@
 use serde_json::Value;
+use std::collections::{HashSet, VecDeque};
 
 use crate::{
     NpcDebugEvent, SURFACE_Y,
     game_state::GameState,
+    inventory::{add_inventory, inventory_count, remove_inventory},
     pheromones::PheromoneChannel,
     role_helpers::orbit::{choose_clockwise_ring_step, perimeter},
-    types::{HubPheromoneTrail, HubState, Position, Tile},
+    types::{HubPatrolLeg, HubPheromoneTrail, HubState, Position, Tile},
 };
 
 const INITIAL_HUB_ORBIT_RADIUS: i32 = 1;
 const HUB_PHEROMONE_RADIUS: i32 = 60;
 const HUB_PHEROMONE_PEAK: u8 = 240;
+const TUNNEL_PHEROMONE_THRESHOLD: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HubPlanStep {
@@ -23,7 +26,7 @@ enum HubPlanStep {
     EndPheromoneTrail { channel: PheromoneChannel },
     SetHubLocation,
     MoveToSurface { dig: bool },
-    MoveToHub,
+    MoveToHub { dig: bool },
     HoldAtHub,
 }
 
@@ -100,13 +103,13 @@ pub(crate) fn tick(
             state.current_target = Some(target);
             tick_toward(game, index, &mut state, target, true, false, dig, events)
         }
-        HubPlanStep::MoveToHub => {
+        HubPlanStep::MoveToHub { dig } => {
             if !state.has_hub_location {
                 false
             } else {
                 let hub_center = state.hub_center;
                 state.current_target = Some(hub_center);
-                tick_toward(game, index, &mut state, hub_center, true, true, false, events)
+                tick_toward(game, index, &mut state, hub_center, true, true, dig, events)
             }
         }
         HubPlanStep::HoldAtHub => {
@@ -218,12 +221,16 @@ fn configured_plan(config: &Value) -> Vec<HubPlanStep> {
             steps.push(HubPlanStep::MoveToSurface { dig });
             continue;
         }
-        if object
-            .get("move_to_hub")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            steps.push(HubPlanStep::MoveToHub);
+        if let Some(move_to_hub) = object.get("move_to_hub") {
+            let dig = move_to_hub
+                .as_object()
+                .and_then(|value| value.get("dig"))
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| move_to_hub.as_bool().unwrap_or(false));
+            if move_to_hub.is_boolean() && !dig {
+                continue;
+            }
+            steps.push(HubPlanStep::MoveToHub { dig });
             continue;
         }
         if object
@@ -248,7 +255,7 @@ fn orbit_max_radius(config: &Value) -> i32 {
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
         .unwrap_or(9)
-        .max(INITIAL_HUB_ORBIT_RADIUS)
+        .max(1)
 }
 
 fn default_plan() -> Vec<HubPlanStep> {
@@ -278,7 +285,7 @@ fn default_plan() -> Vec<HubPlanStep> {
             initial_value: 100,
             change_on_step: -1,
         },
-        HubPlanStep::MoveToHub,
+        HubPlanStep::MoveToHub { dig: true },
         HubPlanStep::EndPheromoneTrail {
             channel: PheromoneChannel::EntryTunnel,
         },
@@ -296,7 +303,7 @@ fn derive_hub_center(origin: Position, plan: &[HubPlanStep]) -> Option<Position>
             HubPlanStep::SetHubLocation => return Some(cursor),
             HubPlanStep::BeginPheromoneTrail { .. } | HubPlanStep::EndPheromoneTrail { .. } => {}
             HubPlanStep::MoveToSurface { .. }
-            | HubPlanStep::MoveToHub
+            | HubPlanStep::MoveToHub { .. }
             | HubPlanStep::HoldAtHub => return Some(cursor),
         }
     }
@@ -308,9 +315,62 @@ fn tick_hold_at_hub(game: &mut GameState, index: usize, state: &mut HubState, ev
         return;
     }
 
+    let pos = game.npcs[index].pos;
+    if should_orbit_at_hub(state, pos) {
+        start_orbit_cycle(state);
+    }
+    if state.orbit_radius.is_some() || state.orbit_returning_to_center {
+        tick_hub_orbit(game, index, state, events);
+        let current_pos = game.npcs[index].pos;
+        if state.orbit_radius.is_some() || state.orbit_returning_to_center || current_pos != state.hub_center
+        {
+            return;
+        }
+        advance_patrol_leg(state);
+    }
+
+    let pos = game.npcs[index].pos;
+    let mut target = patrol_target(state);
+    if pos == target {
+        advance_patrol_leg(state);
+        target = patrol_target(state);
+    }
+    let Some(next) = choose_tunnel_patrol_step(game, index, state, pos, target) else {
+        return;
+    };
+    move_or_dig(game, index, state, next, true, events);
+    if game.npcs[index].pos == next {
+        let _ = try_fill_tunnel_gap(game, index, state, events);
+    }
+}
+
+fn should_orbit_at_hub(state: &HubState, pos: Position) -> bool {
+    pos == state.hub_center
+        && state.orbit_radius.is_none()
+        && !state.orbit_returning_to_center
+        && matches!(
+            state.patrol_leg,
+            HubPatrolLeg::ToHubFromQueenChamber | HubPatrolLeg::ToHubFromSurface
+        )
+}
+
+fn start_orbit_cycle(state: &mut HubState) {
+    state.orbit_radius = Some(INITIAL_HUB_ORBIT_RADIUS);
+    state.orbit_anchor = None;
+    state.orbit_has_left_anchor = false;
+    state.orbit_returning_to_center = false;
+}
+
+fn tick_hub_orbit(game: &mut GameState, index: usize, state: &mut HubState, events: &mut Vec<String>) {
     if state.orbit_returning_to_center {
         let hub_center = state.hub_center;
         let _ = tick_toward(game, index, state, hub_center, true, true, true, events);
+        if game.npcs[index].pos == hub_center {
+            state.orbit_radius = None;
+            state.orbit_anchor = None;
+            state.orbit_has_left_anchor = false;
+            state.orbit_returning_to_center = false;
+        }
         return;
     }
 
@@ -332,7 +392,6 @@ fn tick_hold_at_hub(game: &mut GameState, index: usize, state: &mut HubState, ev
     if ring.contains(&pos) {
         update_hub_orbit_growth(state, pos, &ring, orbit_max_radius(&game.config));
         if state.orbit_returning_to_center {
-            game.npcs[index].search_destination = None;
             return;
         }
     }
@@ -447,6 +506,11 @@ fn move_or_dig(
 
     let npc_pos = game.npcs[index].pos;
     if dig && !matches!(tile, Tile::Empty) {
+        match tile {
+            Tile::Dirt => add_inventory(&mut game.npcs[index].inventory, "dirt", 1),
+            Tile::Resource => add_inventory(&mut game.npcs[index].inventory, "ore", 1),
+            Tile::Empty | Tile::Stone | Tile::Food | Tile::Bedrock => {}
+        }
         game.set_world_tile(next, Tile::Empty);
         events.push(format!(
             "NPC ant {} dug hub tunnel at {},{}",
@@ -483,6 +547,264 @@ fn emit_active_trail(game: &mut GameState, index: usize, state: &mut HubState, p
     }
     trail.next_value = apply_trail_step_change(trail.next_value, trail.change_on_step);
     state.active_pheromone_trail = Some(trail);
+}
+
+fn patrol_target(state: &HubState) -> Position {
+    match state.patrol_leg {
+        HubPatrolLeg::ToQueenChamber => state.origin,
+        HubPatrolLeg::ToHubFromQueenChamber => state.hub_center,
+        HubPatrolLeg::ToSurface => Position {
+            x: state.hub_center.x,
+            y: SURFACE_Y + 1,
+        },
+        HubPatrolLeg::ToHubFromSurface => state.hub_center,
+    }
+}
+
+fn choose_tunnel_patrol_step(
+    game: &GameState,
+    index: usize,
+    state: &HubState,
+    origin: Position,
+    target: Position,
+) -> Option<Position> {
+    if origin == target {
+        return None;
+    }
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    visited.insert(origin);
+    queue.push_back((origin, None::<Position>));
+
+    while let Some((pos, first_step)) = queue.pop_front() {
+        for next in ordered_neighbors_toward(pos, target) {
+            if visited.contains(&next) || !hub_tunnel_traversable(game, index, state, next, target) {
+                continue;
+            }
+            let first_step = first_step.or(Some(next));
+            if next == target {
+                return first_step;
+            }
+            visited.insert(next);
+            queue.push_back((next, first_step));
+        }
+    }
+
+    None
+}
+
+fn hub_tunnel_traversable(
+    game: &GameState,
+    index: usize,
+    state: &HubState,
+    pos: Position,
+    target: Position,
+) -> bool {
+    if !game.world.in_bounds(pos)
+        || game.players.values().any(|player| player.pos == pos)
+        || game.npc_blocks_movement(pos, index)
+    {
+        return false;
+    }
+    let Some(tile) = game.world.tile(pos) else {
+        return false;
+    };
+    if matches!(tile, Tile::Bedrock | Tile::Stone) {
+        return false;
+    }
+    if pos == target {
+        return true;
+    }
+    patrol_leg_channel(state.patrol_leg)
+        .is_some_and(|channel| game.pheromones.value(pos, game.npcs[index].hive_id.unwrap_or(0), channel) >= TUNNEL_PHEROMONE_THRESHOLD)
+}
+
+fn patrol_leg_channel(leg: HubPatrolLeg) -> Option<PheromoneChannel> {
+    match leg {
+        HubPatrolLeg::ToQueenChamber | HubPatrolLeg::ToHubFromQueenChamber => {
+            Some(PheromoneChannel::QueenChamberTunnel)
+        }
+        HubPatrolLeg::ToSurface | HubPatrolLeg::ToHubFromSurface => {
+            Some(PheromoneChannel::EntryTunnel)
+        }
+    }
+}
+
+fn ordered_neighbors_toward(pos: Position, target: Position) -> [Position; 4] {
+    let dx = target.x - pos.x;
+    let dy = target.y - pos.y;
+    let horizontal_first = dx.abs() >= dy.abs();
+    let x_step = pos.offset(dx.signum(), 0);
+    let y_step = pos.offset(0, dy.signum());
+    let x_back = pos.offset(-dx.signum(), 0);
+    let y_back = pos.offset(0, -dy.signum());
+
+    if horizontal_first {
+        [x_step, y_step, y_back, x_back]
+    } else {
+        [y_step, x_step, x_back, y_back]
+    }
+}
+
+fn advance_patrol_leg(state: &mut HubState) {
+    state.patrol_leg = match state.patrol_leg {
+        HubPatrolLeg::ToQueenChamber => HubPatrolLeg::ToHubFromQueenChamber,
+        HubPatrolLeg::ToHubFromQueenChamber => HubPatrolLeg::ToSurface,
+        HubPatrolLeg::ToSurface => HubPatrolLeg::ToHubFromSurface,
+        HubPatrolLeg::ToHubFromSurface => HubPatrolLeg::ToQueenChamber,
+    };
+}
+
+fn try_fill_tunnel_gap(
+    game: &mut GameState,
+    index: usize,
+    state: &HubState,
+    events: &mut Vec<String>,
+) -> bool {
+    if inventory_count(&game.npcs[index].inventory, "dirt") == 0 {
+        return false;
+    }
+    let Some(hive_id) = game.npcs[index].hive_id else {
+        return false;
+    };
+
+    let pos = game.npcs[index].pos;
+    let candidates = [
+        pos.offset(-1, 0),
+        pos.offset(1, 0),
+        pos.offset(0, -1),
+        pos.offset(0, 1),
+    ];
+    let mut best_target = None;
+    let mut best_score = i32::MIN;
+    for target in candidates {
+        let Some(score) = tunnel_fill_score(game, index, state, hive_id, target) else {
+            continue;
+        };
+        if score > best_score {
+            best_score = score;
+            best_target = Some(target);
+        }
+    }
+
+    let Some(target) = best_target else {
+        return false;
+    };
+    if !remove_inventory(&mut game.npcs[index].inventory, "dirt", 1) {
+        return false;
+    }
+    game.set_world_tile(target, Tile::Dirt);
+    let npc_id = game.npcs[index].id;
+    events.push(format!("NPC ant {} repaired tunnel wall at {},{}", npc_id, target.x, target.y));
+    game.push_npc_debug_event(NpcDebugEvent {
+        tick: game.tick,
+        npc_id,
+        hive_id: Some(hive_id),
+        event_type: "hub_fill".to_string(),
+        pos,
+        details: serde_json::json!({
+            "target": { "x": target.x, "y": target.y },
+            "remaining_dirt": inventory_count(&game.npcs[index].inventory, "dirt"),
+        }),
+    });
+    true
+}
+
+fn tunnel_fill_score(
+    game: &GameState,
+    index: usize,
+    state: &HubState,
+    hive_id: u16,
+    target: Position,
+) -> Option<i32> {
+    if !game.world.in_bounds(target) || game.world.tile(target) != Some(Tile::Empty) {
+        return None;
+    }
+    if game
+        .npcs
+        .iter()
+        .enumerate()
+        .any(|(other_index, npc)| other_index != index && npc.pos == target)
+        || game.players.values().any(|player| player.pos == target)
+    {
+        return None;
+    }
+    if is_tunnel_tile(game, hive_id, target)
+        || is_inside_hub_zone(state, target, orbit_max_radius(&game.config))
+        || is_inside_queen_chamber_zone(game, hive_id, target)
+    {
+        return None;
+    }
+
+    let cardinal_neighbors = [
+        target.offset(-1, 0),
+        target.offset(1, 0),
+        target.offset(0, -1),
+        target.offset(0, 1),
+    ];
+    let mut tunnel_neighbor_count = 0;
+    let mut tunnel_neighbor_strength = 0;
+    let mut solid_neighbor_count = 0;
+    let mut open_nontunnel_neighbor_count = 0;
+    for neighbor in cardinal_neighbors {
+        if !game.world.in_bounds(neighbor) {
+            continue;
+        }
+        if is_tunnel_tile(game, hive_id, neighbor) {
+            tunnel_neighbor_count += 1;
+            tunnel_neighbor_strength += i32::from(tunnel_strength(game, hive_id, neighbor));
+            continue;
+        }
+        match game.world.tile(neighbor) {
+            Some(Tile::Dirt | Tile::Stone | Tile::Bedrock | Tile::Resource) => {
+                solid_neighbor_count += 1;
+            }
+            Some(Tile::Empty) => {
+                open_nontunnel_neighbor_count += 1;
+            }
+            Some(Tile::Food) | None => {}
+        }
+    }
+
+    if tunnel_neighbor_count < 1 || solid_neighbor_count < 2 || open_nontunnel_neighbor_count > 1 {
+        return None;
+    }
+
+    Some(tunnel_neighbor_strength + solid_neighbor_count * 10 - open_nontunnel_neighbor_count * 5)
+}
+
+fn is_tunnel_tile(game: &GameState, hive_id: u16, pos: Position) -> bool {
+    tunnel_strength(game, hive_id, pos) >= TUNNEL_PHEROMONE_THRESHOLD
+}
+
+fn tunnel_strength(game: &GameState, hive_id: u16, pos: Position) -> u8 {
+    let queen_tunnel = game
+        .pheromones
+        .value(pos, hive_id, PheromoneChannel::QueenChamberTunnel);
+    let entry_tunnel = game
+        .pheromones
+        .value(pos, hive_id, PheromoneChannel::EntryTunnel);
+    queen_tunnel.max(entry_tunnel)
+}
+
+fn is_inside_hub_zone(state: &HubState, pos: Position, radius: i32) -> bool {
+    (pos.x - state.hub_center.x)
+        .abs()
+        .max((pos.y - state.hub_center.y).abs())
+        <= radius
+}
+
+fn is_inside_queen_chamber_zone(game: &GameState, hive_id: u16, pos: Position) -> bool {
+    let Some(queen_pos) = game.find_queen_pos(hive_id) else {
+        return false;
+    };
+    let (radius_x, radius_y) = game.queen_chamber_max_radii();
+    let dx = f64::from(pos.x - queen_pos.x);
+    let dy = f64::from(pos.y - queen_pos.y);
+    ((dx * dx) / f64::from(radius_x * radius_x))
+        + ((dy * dy) / f64::from(radius_y * radius_y))
+        <= 1.0
 }
 
 fn apply_trail_step_change(value: u8, delta: i16) -> u8 {

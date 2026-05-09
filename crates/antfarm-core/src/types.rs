@@ -119,6 +119,8 @@ pub struct HubState {
     pub orbit_returning_to_center: bool,
     #[serde(default)]
     pub active_pheromone_trail: Option<HubPheromoneTrail>,
+    #[serde(default)]
+    pub patrol_leg: HubPatrolLeg,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +128,15 @@ pub struct HubPheromoneTrail {
     pub channel: PheromoneChannel,
     pub next_value: u8,
     pub change_on_step: i16,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum HubPatrolLeg {
+    #[default]
+    ToQueenChamber,
+    ToHubFromQueenChamber,
+    ToSurface,
+    ToHubFromSurface,
 }
 
 impl Default for HubState {
@@ -141,6 +152,7 @@ impl Default for HubState {
             orbit_has_left_anchor: false,
             orbit_returning_to_center: false,
             active_pheromone_trail: None,
+            patrol_leg: HubPatrolLeg::ToHubFromSurface,
         }
     }
 }
