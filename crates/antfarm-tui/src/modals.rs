@@ -44,7 +44,7 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("Tab: toggle NPC health/food bars"),
         Line::from("r: toggle worker role labels"),
         Line::from(pause_line),
-        Line::from("o: cycle pheromone overlay (home/food/off)"),
+        Line::from("o: cycle pheromone overlay (home/food/hub/queen_tunnel/entry_tunnel/off)"),
         Line::from("/help"),
         Line::from("/cc set show_help_at_startup false"),
         Line::from("/cc set max_history 100"),

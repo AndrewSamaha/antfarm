@@ -1,3 +1,4 @@
+mod ant_roles;
 mod art;
 mod config;
 mod constants;
@@ -9,6 +10,7 @@ mod npc_debug;
 mod pheromones;
 mod protocol;
 mod replay;
+mod role_helpers;
 mod types;
 mod world;
 

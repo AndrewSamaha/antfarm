@@ -36,22 +36,61 @@ struct ClientRuntimeOptions {
     port: u16,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    let terminal = ratatui::init();
+enum LaunchMode {
+    Replay(PathBuf),
+    Client(ClientRuntimeOptions),
+}
 
-    let result = if args.first().is_some_and(|arg| arg == "--replay") {
+fn print_help() {
+    println!(
+        "\
+antfarm-tui
+
+Usage:
+  antfarm-tui [OPTIONS] [player-name]
+  antfarm-tui --replay <replay-artifact-path>
+
+Options:
+      -h, --help      Show this help text and exit
+      --dev           Use ephemeral client state and skip persisted files
+      --port VALUE    Connect to localhost on the provided port
+      --replay PATH   Open one deterministic replay artifact
+"
+    );
+}
+
+fn parse_launch_mode(args: &[String]) -> Result<LaunchMode> {
+    if args.first().is_some_and(|arg| arg == "--replay") {
         let path = args
             .get(1)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("--replay requires a replay artifact path"))?;
-        run_replay_app(terminal, PathBuf::from(path)).await
-    } else {
-        let options = parse_client_options(&args)?;
-        run_app(terminal, options).await
+        if let Some(extra) = args.get(2) {
+            return Err(anyhow::anyhow!(
+                "unexpected argument after --replay path: {extra}"
+            ));
+        }
+        return Ok(LaunchMode::Replay(PathBuf::from(path)));
+    }
+
+    Ok(LaunchMode::Client(parse_client_options(args)?))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        print_help();
+        return Ok(());
+    }
+    let launch_mode = parse_launch_mode(&args)?;
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    let terminal = ratatui::init();
+
+    let result = match launch_mode {
+        LaunchMode::Replay(path) => run_replay_app(terminal, path).await,
+        LaunchMode::Client(options) => run_app(terminal, options).await,
     };
 
     ratatui::restore();
@@ -228,13 +267,15 @@ async fn run_app(mut terminal: DefaultTerminal, options: ClientRuntimeOptions) -
                 }
             }
             _ = pheromone_refresh.tick(), if connection.is_some() => {
-                if let (Some(channel), Some(player), Some(connection)) = (app.pheromone_overlay, app.player(), connection.as_mut()) {
-                    if let Some(hive_id) = player.hive_id {
-                        crate::network::send_message(
-                            &mut connection.writer,
-                            ClientMessage::RequestPheromoneMap { hive_id, channel },
-                        ).await?;
-                    }
+                if let (Some(channel), Some(hive_id), Some(connection)) = (
+                    app.pheromone_overlay,
+                    app.preferred_hive_id(),
+                    connection.as_mut(),
+                ) {
+                    crate::network::send_message(
+                        &mut connection.writer,
+                        ClientMessage::RequestPheromoneMap { hive_id, channel },
+                    ).await?;
                 }
             }
             maybe_message = recv_server_message(&mut connection), if connection.is_some() => {

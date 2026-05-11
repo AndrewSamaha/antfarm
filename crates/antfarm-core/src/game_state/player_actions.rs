@@ -8,7 +8,7 @@ use crate::{
     },
     pheromones::AntBehaviorState,
     protocol::{Action, DigProgress, PlaceMaterial, PlacedArt, Snapshot},
-    types::{Facing, MoveDir, NpcAnt, NpcKind, Player, Position, QueenChamberGrowthMode, Tile},
+    types::{Facing, MoveDir, NpcAnt, NpcKind, NpcRoleState, Player, Position, Tile},
 };
 
 use super::GameState;
@@ -253,16 +253,14 @@ impl GameState {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: None,
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
         self.next_hive_id = self.next_hive_id.saturating_add(1);
         self.next_npc_id = self.next_npc_id.saturating_add(1);
@@ -768,16 +766,14 @@ impl GameState {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: None,
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
         self.next_npc_id = self.next_npc_id.saturating_add(1);
         self.players_dirty = true;

@@ -37,6 +37,24 @@ fn default_config() -> Value {
                     "weight": 3
                 },
                 "hive_maintenance": {
+                        "hub": {
+                            "lifespan": 2000,
+                            "max": 1,
+                            "orbit_max_radius": 9,
+                            "plan": [
+                            { "begin_pheromone_trail": { "pheromone": "queen_chamber_tunnel", "initial_value": 100, "change_on_step": -1 } },
+                            { "move_relative": { "x": 50, "y": 50, "dig": true } },
+                            { "move_relative": { "x": 10, "y": 0, "dig": true } },
+                            { "set_hub_location": true },
+                            { "end_pheromone_trail": "queen_chamber_tunnel" },
+                            { "move_to_surface": { "dig": true } },
+                            { "begin_pheromone_trail": { "pheromone": "entry_tunnel", "initial_value": 100, "change_on_step": -1 } },
+                            { "move_to_hub": true },
+                            { "end_pheromone_trail": "entry_tunnel" },
+                            { "hold_at_hub": true }
+                        ],
+                        "weight": 1
+                    },
                     "queen_chamber": {
                         "lifespan": 2000,
                         "radius_x": 20,

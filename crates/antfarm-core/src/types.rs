@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{pheromones::AntBehaviorState, world::World};
+use crate::{
+    pheromones::{AntBehaviorState, PheromoneChannel},
+    world::World,
+};
 
 pub const DEFAULT_WORKER_ROLE_PATH: &str = "food_gatherer";
 
@@ -75,6 +78,94 @@ pub enum QueenChamberGrowthMode {
     Inward,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueenChamberState {
+    pub radius_x: Option<i32>,
+    pub radius_y: Option<i32>,
+    pub anchor: Option<Position>,
+    pub has_left_anchor: bool,
+    pub growth_mode: QueenChamberGrowthMode,
+}
+
+impl Default for QueenChamberState {
+    fn default() -> Self {
+        Self {
+            radius_x: None,
+            radius_y: None,
+            anchor: None,
+            has_left_anchor: false,
+            growth_mode: QueenChamberGrowthMode::Outward,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubState {
+    pub origin: Position,
+    pub hub_center: Position,
+    #[serde(default)]
+    pub has_hub_location: bool,
+    #[serde(default)]
+    pub step_index: u16,
+    #[serde(default)]
+    pub current_target: Option<Position>,
+    #[serde(default)]
+    pub orbit_radius: Option<i32>,
+    #[serde(default)]
+    pub orbit_anchor: Option<Position>,
+    #[serde(default)]
+    pub orbit_has_left_anchor: bool,
+    #[serde(default)]
+    pub orbit_returning_to_center: bool,
+    #[serde(default)]
+    pub active_pheromone_trail: Option<HubPheromoneTrail>,
+    #[serde(default)]
+    pub patrol_leg: HubPatrolLeg,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubPheromoneTrail {
+    pub channel: PheromoneChannel,
+    pub next_value: u8,
+    pub change_on_step: i16,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum HubPatrolLeg {
+    #[default]
+    ToQueenChamber,
+    ToHubFromQueenChamber,
+    ToSurface,
+    ToHubFromSurface,
+}
+
+impl Default for HubState {
+    fn default() -> Self {
+        Self {
+            origin: Position { x: 0, y: 0 },
+            hub_center: Position { x: 0, y: 0 },
+            has_hub_location: false,
+            step_index: 0,
+            current_target: None,
+            orbit_radius: None,
+            orbit_anchor: None,
+            orbit_has_left_anchor: false,
+            orbit_returning_to_center: false,
+            active_pheromone_trail: None,
+            patrol_leg: HubPatrolLeg::ToHubFromSurface,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", content = "state", rename_all = "snake_case")]
+pub enum NpcRoleState {
+    #[default]
+    None,
+    QueenChamber(QueenChamberState),
+    Hub(HubState),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub id: u8,
@@ -125,6 +216,10 @@ pub struct NpcAnt {
     #[serde(default)]
     pub search_destination_stuck_ticks: u8,
     #[serde(default)]
+    pub search_opened_tile: Option<Position>,
+    #[serde(default)]
+    pub search_refill_tile: Option<Position>,
+    #[serde(default)]
     pub has_delivered_food: bool,
     #[serde(default)]
     pub last_dirt_place_tick: Option<u64>,
@@ -135,15 +230,35 @@ pub struct NpcAnt {
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
-    pub chamber_radius_x: Option<i32>,
-    #[serde(default)]
-    pub chamber_radius_y: Option<i32>,
-    #[serde(default)]
-    pub chamber_anchor: Option<Position>,
-    #[serde(default)]
-    pub chamber_has_left_anchor: bool,
-    #[serde(default)]
-    pub chamber_growth_mode: QueenChamberGrowthMode,
+    pub role_state: NpcRoleState,
+}
+
+impl NpcAnt {
+    pub fn queen_chamber_state(&self) -> QueenChamberState {
+        match &self.role_state {
+            NpcRoleState::QueenChamber(state) => *state,
+            NpcRoleState::None | NpcRoleState::Hub(_) => QueenChamberState::default(),
+        }
+    }
+
+    pub fn set_queen_chamber_state(&mut self, state: QueenChamberState) {
+        self.role_state = NpcRoleState::QueenChamber(state);
+    }
+
+    pub fn hub_state(&self) -> Option<HubState> {
+        match &self.role_state {
+            NpcRoleState::Hub(state) => Some(*state),
+            NpcRoleState::None | NpcRoleState::QueenChamber(_) => None,
+        }
+    }
+
+    pub fn set_hub_state(&mut self, state: HubState) {
+        self.role_state = NpcRoleState::Hub(state);
+    }
+
+    pub fn clear_role_state(&mut self) {
+        self.role_state = NpcRoleState::None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -200,5 +315,90 @@ impl Viewport {
             width,
             height,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn npc_ant_deserializes_role_state() {
+        let npc: NpcAnt = serde_json::from_value(json!({
+            "id": 7,
+            "pos": { "x": 12, "y": 34 },
+            "role": "hive_maintenance.queen_chamber",
+            "role_state": {
+                "kind": "queen_chamber",
+                "state": {
+                    "radius_x": 6,
+                    "radius_y": 5,
+                    "anchor": { "x": 10, "y": 29 },
+                    "has_left_anchor": true,
+                    "growth_mode": "Inward"
+                }
+            }
+        }))
+        .expect("npc ant should deserialize");
+
+        assert_eq!(
+            npc.role_state,
+            NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(6),
+                radius_y: Some(5),
+                anchor: Some(Position { x: 10, y: 29 }),
+                has_left_anchor: true,
+                growth_mode: QueenChamberGrowthMode::Inward,
+            })
+        );
+    }
+
+    #[test]
+    fn npc_ant_serializes_role_state_without_legacy_chamber_fields() {
+        let npc = NpcAnt {
+            id: 7,
+            pos: Position { x: 12, y: 34 },
+            inventory: HashMap::new(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 0,
+            hive_id: None,
+            age_ticks: 0,
+            behavior: AntBehaviorState::Idle,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("hive_maintenance.queen_chamber".to_string()),
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(6),
+                radius_y: Some(5),
+                anchor: Some(Position { x: 10, y: 29 }),
+                has_left_anchor: true,
+                growth_mode: QueenChamberGrowthMode::Inward,
+            }),
+        };
+
+        let value = serde_json::to_value(npc).expect("npc ant should serialize");
+        let object = value.as_object().expect("npc ant json object");
+        assert!(object.contains_key("role_state"));
+        assert!(!object.contains_key("chamber_radius_x"));
+        assert!(!object.contains_key("chamber_radius_y"));
+        assert!(!object.contains_key("chamber_anchor"));
+        assert!(!object.contains_key("chamber_has_left_anchor"));
+        assert!(!object.contains_key("chamber_growth_mode"));
     }
 }

@@ -395,13 +395,13 @@ impl GameState {
         self.event_log_dirty = true;
     }
 
-    fn push_npc_debug_event(&mut self, event: NpcDebugEvent) {
+    pub(crate) fn push_npc_debug_event(&mut self, event: NpcDebugEvent) {
         if self.npc_debug_enabled {
             self.npc_debug_events.push(event);
         }
     }
 
-    fn set_world_tile(&mut self, pos: Position, tile: Tile) {
+    pub(crate) fn set_world_tile(&mut self, pos: Position, tile: Tile) {
         if self.world.tile(pos) == Some(tile) {
             return;
         }
@@ -424,17 +424,25 @@ impl GameState {
 
 #[cfg(test)]
 mod tests {
-    use super::{GameState, simulation::*};
+    use super::GameState;
     use crate::{
+        ant_roles::{
+            queen_chamber::{
+                queen_chamber_initial_radii_for_mode, random_queen_chamber_growth_mode,
+            },
+        },
         art::find_ascii_art_asset,
         config::set_config_path,
         inventory::default_npc_inventory,
+        pheromones::PheromoneChannel,
         pheromones::AntBehaviorState,
         protocol::PlacedArt,
         replay::ReplayArtifact,
         types::{
-            DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, Position, QueenChamberGrowthMode, Tile,
+            DEFAULT_WORKER_ROLE_PATH, HubPatrolLeg, NpcAnt, NpcKind, NpcRoleState, Position,
+            QueenChamberGrowthMode, QueenChamberState, Tile,
         },
+        SURFACE_Y,
     };
     use rand::{SeedableRng, rngs::StdRng};
     use serde_json::json;
@@ -529,6 +537,12 @@ mod tests {
         });
         set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
             .expect("set queen laying cooldown");
+        set_config_path(
+            &mut config,
+            "colony.roles.hive_maintenance.hub.weight",
+            json!(0),
+        )
+        .expect("disable hub role for queen chamber weighting test");
         let mut game = GameState::from_config(config);
         seed_test_colony(&mut game);
         game.set_queen_eggs(4).expect("seed four eggs");
@@ -558,9 +572,17 @@ mod tests {
             .filter(|npc| npc.role.as_deref() == Some("hive_maintenance.queen_chamber"))
             .cloned()
             .collect();
+        let hub_workers: Vec<_> = game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker)
+            .filter(|npc| npc.role.as_deref() == Some("hive_maintenance.hub"))
+            .cloned()
+            .collect();
 
         assert_eq!(food_gatherers, 3);
         assert_eq!(queen_chamber_workers.len(), 1);
+        assert!(hub_workers.is_empty());
 
         let maintenance_worker = queen_chamber_workers
             .first()
@@ -580,6 +602,249 @@ mod tests {
         assert_eq!(
             maintenance_worker.role.as_deref(),
             Some("hive_maintenance.queen_chamber")
+        );
+    }
+
+    #[test]
+    fn hub_role_is_capped_at_one_per_hive_and_emits_below_ground() {
+        let mut config = json!({
+            "world": { "seed": 13 },
+            "soil": { "settle_frequency": 0.0 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "minimum_delay_to_hatch": 1,
+                "roles": {
+                    "food_gatherer": {
+                        "weight": 1,
+                        "max": 30
+                    },
+                    "hive_maintenance": {
+                        "hub": {
+                            "weight": 1,
+                            "max": 1
+                        }
+                    }
+                }
+            }
+        });
+        set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
+            .expect("set queen laying cooldown");
+        set_config_path(
+            &mut config,
+            "colony.roles.hive_maintenance.hub.plan",
+            json!([
+                { "move_relative": { "x": 4, "y": 4, "dig": true } },
+                { "move_relative": { "x": 2, "y": 0, "dig": true } },
+                { "set_hub_location": true },
+                { "move_to_surface": { "dig": true } },
+                { "move_to_hub": true },
+                { "hold_at_hub": true }
+            ]),
+        )
+        .expect("set smaller hub plan for test");
+        let mut game = GameState::from_config(config);
+        game.set_config_value("colony.roles.hive_maintenance.hub.orbit_max_radius", json!(3))
+            .expect("set smaller hub orbit radius for test");
+        seed_test_colony(&mut game);
+        game.set_queen_eggs(4).expect("seed four eggs");
+
+        while game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker && npc.hive_id.is_some())
+            .count()
+            < 4
+        {
+            game.tick();
+        }
+
+        let hub_workers: Vec<_> = game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker)
+            .filter(|npc| npc.role.as_deref() == Some("hive_maintenance.hub"))
+            .cloned()
+            .collect();
+        assert_eq!(hub_workers.len(), 1);
+
+        let hub_id = hub_workers[0].id;
+        for _ in 0..500 {
+            game.tick();
+        }
+
+        let hub_worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .expect("hub worker should still exist");
+        let hub_state = hub_worker.hub_state().expect("hub state should exist");
+        assert!(hub_state.has_hub_location);
+        assert_eq!(usize::from(hub_state.step_index), 5);
+        assert!(
+            hub_worker.pos == hub_state.hub_center
+                || matches!(
+                    hub_state.patrol_leg,
+                    HubPatrolLeg::ToQueenChamber
+                        | HubPatrolLeg::ToHubFromQueenChamber
+                        | HubPatrolLeg::ToSurface
+                        | HubPatrolLeg::ToHubFromSurface
+                )
+        );
+
+        let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
+        assert!(
+            game.pheromones
+                .value(hub_state.hub_center, hive_id, PheromoneChannel::Hub)
+                > 0
+        );
+        assert_eq!(
+            game.pheromones.value(
+                Position {
+                    x: hub_state.hub_center.x,
+                    y: SURFACE_Y,
+                },
+                hive_id,
+                PheromoneChannel::Hub,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn hub_plan_pheromone_trails_start_and_stop_in_the_expected_phases() {
+        let mut config = json!({
+            "world": { "seed": 17 },
+            "soil": { "settle_frequency": 0.0 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "minimum_delay_to_hatch": 1,
+                "roles": {
+                    "food_gatherer": {
+                        "weight": 0,
+                        "max": 0
+                    },
+                    "hive_maintenance": {
+                        "hub": {
+                            "weight": 1,
+                            "max": 1,
+                            "plan": [
+                                { "begin_pheromone_trail": { "pheromone": "queen_chamber_tunnel", "initial_value": 5, "change_on_step": -1 } },
+                                { "move_relative": { "x": 0, "y": 3, "dig": true } },
+                                { "set_hub_location": true },
+                                { "end_pheromone_trail": "queen_chamber_tunnel" },
+                                { "move_to_surface": { "dig": true } },
+                                { "begin_pheromone_trail": { "pheromone": "entry_tunnel", "initial_value": 5, "change_on_step": -1 } },
+                                { "move_to_hub": true },
+                                { "end_pheromone_trail": "entry_tunnel" },
+                                { "hold_at_hub": true }
+                            ]
+                        },
+                        "queen_chamber": {
+                            "weight": 0
+                        }
+                    }
+                }
+            }
+        });
+        set_config_path(&mut config, "queen.egg_laying_cooldown_ticks", json!(10))
+            .expect("set queen laying cooldown");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        game.set_queen_eggs(1).expect("seed one egg");
+
+        while game
+            .npcs
+            .iter()
+            .filter(|npc| npc.kind == NpcKind::Worker && npc.hive_id.is_some())
+            .count()
+            < 1
+        {
+            game.tick();
+        }
+
+        let hub_worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Worker)
+            .cloned()
+            .expect("hub worker should exist");
+        let hub_id = hub_worker.id;
+        let hive_id = hub_worker.hive_id.expect("hub worker should have hive");
+
+        while game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .and_then(|npc| npc.hub_state())
+            .expect("hub state should exist")
+            .step_index
+            < 4
+        {
+            game.tick();
+        }
+
+        let hub_state = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .and_then(|npc| npc.hub_state())
+            .expect("hub state should exist");
+        let queen_tunnel_first_step = hub_state.origin.offset(0, 1);
+
+        let queen_tunnel_start_value = game.pheromones.value(
+            queen_tunnel_first_step,
+            hive_id,
+            PheromoneChannel::QueenChamberTunnel,
+        );
+        let queen_tunnel_hub_value = game.pheromones.value(
+            hub_state.hub_center,
+            hive_id,
+            PheromoneChannel::QueenChamberTunnel,
+        );
+        assert!(queen_tunnel_start_value > 0);
+        assert!(queen_tunnel_hub_value > 0);
+        assert!(queen_tunnel_start_value >= queen_tunnel_hub_value);
+
+        while game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .and_then(|npc| npc.hub_state())
+            .expect("hub state should exist")
+            .step_index
+            < 6
+        {
+            game.tick();
+        }
+
+        let surface_pos = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .map(|npc| npc.pos)
+            .expect("hub worker should still exist");
+        assert_eq!(surface_pos.y, SURFACE_Y + 1);
+        assert_eq!(
+            game.pheromones
+                .value(surface_pos, hive_id, PheromoneChannel::EntryTunnel),
+            0
+        );
+
+        game.tick();
+
+        let first_entry_tunnel_step = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == hub_id)
+            .map(|npc| npc.pos)
+            .expect("hub worker should still exist");
+        assert_eq!(first_entry_tunnel_step.y, SURFACE_Y + 2);
+        assert!(
+            game.pheromones.value(
+                first_entry_tunnel_step,
+                hive_id,
+                PheromoneChannel::EntryTunnel
+            ) > 0
         );
     }
 
@@ -643,16 +908,20 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
 
         for _ in 0..40 {
@@ -760,16 +1029,20 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(6),
-            chamber_radius_y: Some(5),
-            chamber_anchor: Some(start),
-            chamber_has_left_anchor: true,
-            chamber_growth_mode: QueenChamberGrowthMode::Inward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(6),
+                radius_y: Some(5),
+                anchor: Some(start),
+                has_left_anchor: true,
+                growth_mode: QueenChamberGrowthMode::Inward,
+            }),
         });
 
         game.tick();
@@ -779,8 +1052,9 @@ mod tests {
             .iter()
             .find(|npc| npc.id == worker_id)
             .expect("worker should still exist");
-        assert_eq!(worker.chamber_radius_x, Some(5));
-        assert_eq!(worker.chamber_radius_y, Some(4));
+        let state = worker.queen_chamber_state();
+        assert_eq!(state.radius_x, Some(5));
+        assert_eq!(state.radius_y, Some(4));
     }
 
     #[test]
@@ -844,16 +1118,20 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
         game.set_world_tile(start.offset(1, 0), Tile::Stone);
 
@@ -932,16 +1210,20 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
 
         game.tick();
@@ -1014,16 +1296,20 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance.queen_chamber".to_string()),
-            chamber_radius_x: Some(20),
-            chamber_radius_y: Some(15),
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::QueenChamber(QueenChamberState {
+                radius_x: Some(20),
+                radius_y: Some(15),
+                anchor: None,
+                has_left_anchor: false,
+                growth_mode: QueenChamberGrowthMode::Outward,
+            }),
         });
 
         game.tick();
@@ -1090,16 +1376,14 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("hive_maintenance".to_string()),
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
 
         let mover_id = game.next_npc_id;
@@ -1124,16 +1408,14 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: Some("food_gatherer".to_string()),
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
 
         game.tick();
@@ -1144,6 +1426,245 @@ mod tests {
             .find(|npc| npc.id == mover_id)
             .expect("mover should still exist");
         assert_eq!(mover.pos, blocker_pos);
+    }
+
+    #[test]
+    fn searching_food_gatherers_refill_self_opened_tunnel_tiles_after_moving_off_them() {
+        let mut config = json!({
+            "world": { "seed": 41 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "search_behavior_profile": "outward_bias_v1"
+            }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open search corridor area");
+        if let Some(queen_mut) = game
+            .npcs
+            .iter_mut()
+            .find(|npc| npc.kind == NpcKind::Queen && npc.id == queen.id)
+        {
+            queen_mut.food = 0;
+        }
+
+        let start = Position {
+            x: queen.pos.x + 10,
+            y: queen.pos.y,
+        };
+        let first_dug = start.offset(1, 0);
+        let second_dug = start.offset(2, 0);
+        game.set_world_tile(first_dug, Tile::Dirt);
+        game.set_world_tile(second_dug, Tile::Dirt);
+        game.set_world_tile(start.offset(-1, 0), Tile::Stone);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, -1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, 1), Tile::Stone);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 0,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            start
+        );
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Empty));
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+        assert_eq!(game.world.tile(start), Some(Tile::Empty));
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
+
+        game.tick();
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, second_dug);
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Dirt));
+        assert_eq!(game.world.tile(start), Some(Tile::Empty));
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
+    }
+
+    #[test]
+    fn returning_food_gatherers_do_not_refill_tunnel_tiles_after_moving_off_them() {
+        let mut config = json!({
+            "world": { "seed": 43 },
+            "colony": { "ambient_worker_count": 0 }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open return corridor area");
+        if let Some(queen_mut) = game
+            .npcs
+            .iter_mut()
+            .find(|npc| npc.kind == NpcKind::Queen && npc.id == queen.id)
+        {
+            queen_mut.food = 0;
+        }
+
+        let start = Position {
+            x: queen.pos.x - 10,
+            y: queen.pos.y,
+        };
+        let first_dug = start.offset(1, 0);
+        let second_dug = start.offset(2, 0);
+        game.set_world_tile(first_dug, Tile::Dirt);
+        game.set_world_tile(second_dug, Tile::Dirt);
+        game.set_world_tile(start.offset(-1, 0), Tile::Stone);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, -1), Tile::Stone);
+        game.set_world_tile(first_dug.offset(0, 1), Tile::Stone);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 1,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::ReturningFood,
+            carrying_food: true,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            start
+        );
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Empty));
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+
+        game.tick();
+        assert_eq!(
+            game.npcs
+                .iter()
+                .find(|npc| npc.id == worker_id)
+                .expect("worker should still exist")
+                .pos,
+            first_dug
+        );
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
+
+        game.tick();
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, second_dug);
+        assert_eq!(game.world.tile(first_dug), Some(Tile::Empty));
+        assert_eq!(game.world.tile(second_dug), Some(Tile::Empty));
     }
 
     fn is_on_queen_chamber_oval_perimeter(
@@ -1286,16 +1807,14 @@ mod tests {
             recent_positions: Vec::new(),
             search_destination: None,
             search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
             has_delivered_food: false,
             last_dirt_place_tick: None,
             last_egg_laid_tick: None,
             last_egg_hatched_tick: None,
             role: None,
-            chamber_radius_x: None,
-            chamber_radius_y: None,
-            chamber_anchor: None,
-            chamber_has_left_anchor: false,
-            chamber_growth_mode: QueenChamberGrowthMode::Outward,
+            role_state: NpcRoleState::None,
         });
         game.next_npc_id = game.next_npc_id.saturating_add(1);
         game.npcs_dirty = true;
