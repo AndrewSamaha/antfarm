@@ -114,6 +114,11 @@ pub enum ClientMessage {
         width: u16,
         height: u16,
     },
+    PutPheromone {
+        channel: PheromoneChannel,
+        pos: Position,
+        value: u8,
+    },
     DebugNpcStart,
     DebugNpcStop,
     DebugNpcStatus,

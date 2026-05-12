@@ -334,6 +334,42 @@ pub(crate) async fn handle_client(stream: TcpStream, state: ServerState) -> Resu
                     broadcast_patch(&state, &patch, None).await?;
                 }
             }
+            ClientMessage::PutPheromone { channel, pos, value } => {
+                let Some(id) = player_id else {
+                    tx.send(ServerMessage::Error {
+                        message: "Join before placing pheromones".to_string(),
+                    })?;
+                    continue;
+                };
+
+                let (maybe_patch, snapshot, hive_id) = {
+                    let mut game = state.game.lock().await;
+                    let hive_id = game
+                        .players
+                        .get(&id)
+                        .and_then(|player| player.hive_id)
+                        .ok_or_else(|| anyhow::anyhow!("player has no hive for pheromone placement"))?;
+                    game.pheromones.deposit(pos, hive_id, channel, value);
+                    let patch = game.take_patch();
+                    let snapshot = game.snapshot();
+                    (patch, snapshot, hive_id)
+                };
+
+                emit_log(
+                    "sc_put_pheromone",
+                    json!({
+                        "player_id": id,
+                        "hive_id": hive_id,
+                        "channel": format!("{channel:?}"),
+                        "pos": { "x": pos.x, "y": pos.y },
+                        "value": value,
+                    }),
+                );
+                let _ = state.persistence_tx.send(PersistMessage::Save(snapshot));
+                if let Some(patch) = maybe_patch {
+                    broadcast_patch(&state, &patch, None).await?;
+                }
+            }
             ClientMessage::SaveGameState { label } => {
                 let Some(_id) = player_id else {
                     tx.send(ServerMessage::Error {

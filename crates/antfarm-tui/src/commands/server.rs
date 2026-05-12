@@ -1,6 +1,19 @@
 use crate::{app::App, commands::parse_config_value, network::send_message};
-use antfarm_core::ClientMessage;
+use antfarm_core::{ClientMessage, PheromoneChannel};
 use anyhow::Result;
+
+fn parse_pheromone_channel(raw: &str) -> Option<PheromoneChannel> {
+    match raw {
+        "home" => Some(PheromoneChannel::Home),
+        "food" => Some(PheromoneChannel::Food),
+        "hub" => Some(PheromoneChannel::Hub),
+        "queen_chamber_tunnel" => Some(PheromoneChannel::QueenChamberTunnel),
+        "entry_tunnel" => Some(PheromoneChannel::EntryTunnel),
+        "threat" => Some(PheromoneChannel::Threat),
+        "defense" => Some(PheromoneChannel::Defense),
+        _ => None,
+    }
+}
 
 pub(super) async fn submit_server_command(
     trimmed: &str,
@@ -233,6 +246,32 @@ pub(super) async fn submit_server_command(
         let _ = args.next();
         let _ = args.next();
         let remaining = args.collect::<Vec<_>>();
+        if let ["pheromone", channel_raw, x_raw, y_raw, value_raw] = remaining.as_slice() {
+            let Some(channel) = parse_pheromone_channel(channel_raw) else {
+                app.set_error("expected pheromone channel: home|food|hub|queen_chamber_tunnel|entry_tunnel|threat|defense");
+                return Ok(());
+            };
+            let x = x_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow::anyhow!("pheromone x must be an integer"))?;
+            let y = y_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow::anyhow!("pheromone y must be an integer"))?;
+            let value = value_raw
+                .parse::<u8>()
+                .map_err(|_| anyhow::anyhow!("pheromone value must be an unsigned integer 0..=255"))?;
+            send_message(
+                writer,
+                ClientMessage::PutPheromone {
+                    channel,
+                    pos: antfarm_core::Position { x, y },
+                    value,
+                },
+            )
+            .await?;
+            app.clear_status();
+            return Ok(());
+        }
         if let [resource, x_raw, y_raw] = remaining.as_slice()
             && matches!(*resource, "q" | "queen")
         {
@@ -274,7 +313,7 @@ pub(super) async fn submit_server_command(
                 )
             }
             _ => {
-                app.set_error("expected: /sc put queen <x> <y>, /sc put <resource> <width> <height>, or /sc put <resource> <x> <y> <width> <height>");
+                app.set_error("expected: /sc put pheromone <channel> <x> <y> <value>, /sc put queen <x> <y>, /sc put <resource> <width> <height>, or /sc put <resource> <x> <y> <width> <height>");
                 return Ok(());
             }
         };
@@ -323,7 +362,7 @@ pub(super) async fn submit_server_command(
     }
 
     if head != "/sc" || verb != "set" || path.is_empty() || raw_value.is_empty() {
-        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc feed_queen <amount>, /sc set queen.eggs <n>, /sc kill <selector>, /sc dig <width> <height>, /sc dig <x> <y> <width> <height>, /sc put queen <x> <y>, /sc put <resource> <width> <height>, /sc put <resource> <x> <y> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
+        app.set_error("expected: /help, /cc set show_help_at_startup true|false, /cc set max_history <n>, /sc show_params, /sc world_reset [seed], /sc save_gamestate \"label\", /sc list_gamestates, /sc delete_gamestate <id|label>, /sc delete_all_gamestates, /sc load_gamestate <id|label>, /sc game pause|unpause, /sc give <player-name|@a|@e> <resource> <amount>, /sc feed_queen <amount>, /sc set queen.eggs <n>, /sc kill <selector>, /sc dig <width> <height>, /sc dig <x> <y> <width> <height>, /sc put pheromone <channel> <x> <y> <value>, /sc put queen <x> <y>, /sc put <resource> <width> <height>, /sc put <resource> <x> <y> <width> <height>, /sc debug.npc start|stop|status, or /sc set <path> <value>");
         return Ok(());
     }
 

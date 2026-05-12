@@ -63,6 +63,7 @@ pub(crate) fn draw_help_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("/sc kill @e[type=worker,hive=none]"),
         Line::from("/sc dig 20 12"),
         Line::from("/sc dig 44 63 20 12"),
+        Line::from("/sc put pheromone food 44 63 100"),
         Line::from("/sc put food 5 5"),
         Line::from("/sc put food 44 63 5 5"),
         Line::from("/sc debug.npc start"),

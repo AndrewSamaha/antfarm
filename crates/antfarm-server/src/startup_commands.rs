@@ -13,6 +13,19 @@ use crate::{
 };
 use serde_json::json;
 
+fn parse_pheromone_channel(raw: &str) -> Option<antfarm_core::PheromoneChannel> {
+    match raw {
+        "home" => Some(antfarm_core::PheromoneChannel::Home),
+        "food" => Some(antfarm_core::PheromoneChannel::Food),
+        "hub" => Some(antfarm_core::PheromoneChannel::Hub),
+        "queen_chamber_tunnel" => Some(antfarm_core::PheromoneChannel::QueenChamberTunnel),
+        "entry_tunnel" => Some(antfarm_core::PheromoneChannel::EntryTunnel),
+        "threat" => Some(antfarm_core::PheromoneChannel::Threat),
+        "defense" => Some(antfarm_core::PheromoneChannel::Defense),
+        _ => None,
+    }
+}
+
 pub(crate) async fn run_startup_sc_commands(
     state: &ServerState,
     snapshot_db_path: &Path,
@@ -367,6 +380,45 @@ async fn run_startup_sc_command(
 
     if let Some(raw) = trimmed.strip_prefix("/sc put ") {
         let args = raw.split_whitespace().collect::<Vec<_>>();
+        if let ["pheromone", channel_raw, x_raw, y_raw, value_raw] = args.as_slice() {
+            let channel = parse_pheromone_channel(channel_raw)
+                .ok_or_else(|| anyhow!("unknown pheromone channel: {channel_raw}"))?;
+            let x = x_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow!("pheromone x must be an integer"))?;
+            let y = y_raw
+                .parse::<i32>()
+                .map_err(|_| anyhow!("pheromone y must be an integer"))?;
+            let value = value_raw
+                .parse::<u8>()
+                .map_err(|_| anyhow!("pheromone value must be an unsigned integer 0..=255"))?;
+            let snapshot = {
+                let mut game = state.game.lock().await;
+                let hive_id = game
+                    .npcs
+                    .iter()
+                    .find(|npc| npc.kind == antfarm_core::NpcKind::Queen)
+                    .and_then(|npc| npc.hive_id)
+                    .ok_or_else(|| anyhow!("no queen hive available for pheromone placement"))?;
+                game.pheromones
+                    .deposit(antfarm_core::Position { x, y }, hive_id, channel, value);
+                let snapshot = game.snapshot();
+                let _ = game.take_patch();
+                snapshot
+            };
+            let _ = state
+                .persistence_tx
+                .send(crate::server_state::PersistMessage::Save(snapshot));
+            emit_log(
+                "startup_sc_put_pheromone",
+                json!({
+                    "channel": channel_raw,
+                    "pos": { "x": x, "y": y },
+                    "value": value,
+                }),
+            );
+            return Ok(());
+        }
         if let [resource, x_raw, y_raw] = args.as_slice()
             && matches!(*resource, "q" | "queen")
         {
@@ -409,7 +461,7 @@ async fn run_startup_sc_command(
             }
             _ => {
                 return Err(anyhow!(
-                    "expected: /sc put queen <x> <y>, /sc put <resource> <width> <height>, or /sc put <resource> <x> <y> <width> <height>"
+                    "expected: /sc put pheromone <channel> <x> <y> <value>, /sc put queen <x> <y>, /sc put <resource> <width> <height>, or /sc put <resource> <x> <y> <width> <height>"
                 ));
             }
         };
