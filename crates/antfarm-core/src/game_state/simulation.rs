@@ -946,7 +946,13 @@ impl GameState {
         }
     }
 
-    pub(crate) fn note_search_opened_tile(&mut self, index: usize, pos: Position) {
+    pub(crate) fn note_search_opened_tile(&mut self, index: usize, current_pos: Position, pos: Position) {
+        if let Some(previous_opened_tile) = self.npcs[index].search_opened_tile
+            && is_cardinally_adjacent(current_pos, previous_opened_tile)
+            && self.can_restore_search_tunnel_tile(index, previous_opened_tile)
+        {
+            self.set_world_tile(previous_opened_tile, Tile::Dirt);
+        }
         self.npcs[index].search_opened_tile = Some(pos);
     }
 
@@ -1168,6 +1174,10 @@ impl GameState {
             self.set_world_tile(pos, Tile::Food);
         }
     }
+}
+
+fn is_cardinally_adjacent(left: Position, right: Position) -> bool {
+    (left.x - right.x).abs() + (left.y - right.y).abs() == 1
 }
 
 impl GameState {

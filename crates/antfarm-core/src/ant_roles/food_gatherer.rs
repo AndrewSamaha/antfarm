@@ -406,7 +406,7 @@ pub(crate) fn tick(
                 }
                 game.set_world_tile(next, Tile::Empty);
                 if matches!(behavior, AntBehaviorState::Searching) {
-                    game.note_search_opened_tile(index, next);
+                    game.note_search_opened_tile(index, npc_pos, next);
                 }
                 events.push(format!("NPC ant {} tunneled at {},{}", npc_id, next.x, next.y));
                 game.update_search_destination_progress(index, npc_pos, None);
