@@ -144,6 +144,6 @@ experiment:
   stop_conditions:
     max_tick: 100
     max_day:
-    all_workers_dead: true
+    all_workers_dead: false
     no_eggs: false
 

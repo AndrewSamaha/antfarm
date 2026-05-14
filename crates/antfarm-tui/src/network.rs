@@ -1,4 +1,6 @@
-use antfarm_core::{ClientMessage, ServerMessage, Snapshot, World, default_server_config};
+use antfarm_core::{
+    ClientMessage, PheromoneGrid, ServerMessage, Snapshot, World, default_server_config,
+};
 use anyhow::{Context, Result};
 use crossterm::{event::Event, event::EventStream};
 use tokio::{
@@ -92,6 +94,7 @@ pub(crate) fn offline_snapshot() -> Snapshot {
     Snapshot {
         tick: 0,
         world: World::empty(1, 1),
+        pheromones: PheromoneGrid::empty(1, 1),
         players: Vec::new(),
         npcs: Vec::new(),
         placed_art: Vec::new(),

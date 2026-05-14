@@ -98,33 +98,46 @@ impl GameState {
     }
 
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
-        let config = merge_with_default_config(snapshot.config);
+        let Snapshot {
+            tick,
+            world,
+            pheromones,
+            npcs,
+            placed_art,
+            config: raw_config,
+            simulation_paused,
+            ..
+        } = snapshot;
+        let config = merge_with_default_config(raw_config);
         let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
-        let next_hive_id = snapshot
-            .placed_art
+        let next_hive_id = placed_art
             .iter()
             .filter_map(|placed| placed.hive_id)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let next_npc_id = snapshot
-            .npcs
+        let next_npc_id = npcs
             .iter()
             .map(|npc| npc.id)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let pheromones = PheromoneGrid::empty(snapshot.world.width(), snapshot.world.height());
+        let pheromones = if pheromones.width() == world.width() && pheromones.height() == world.height()
+        {
+            pheromones
+        } else {
+            PheromoneGrid::empty(world.width(), world.height())
+        };
         Self {
-            tick: snapshot.tick,
-            world: snapshot.world,
+            tick,
+            world,
             pheromones,
             players: HashMap::new(),
-            npcs: snapshot.npcs,
-            placed_art: snapshot.placed_art,
+            npcs,
+            placed_art,
             event_log: vec!["Server restored world snapshot".to_string()],
             config,
-            simulation_paused: snapshot.simulation_paused,
+            simulation_paused,
             found_food_count: 0,
             delivered_food_count: 0,
             egg_laid_count: 0,
@@ -147,44 +160,57 @@ impl GameState {
     }
 
     pub fn from_replay_snapshot(snapshot: Snapshot) -> Self {
-        let config = merge_with_default_config(snapshot.config.clone());
+        let Snapshot {
+            tick,
+            world,
+            pheromones,
+            players: snapshot_players,
+            npcs,
+            placed_art,
+            event_log,
+            config: raw_config,
+            simulation_paused,
+        } = snapshot;
+        let config = merge_with_default_config(raw_config.clone());
         let seed = config_u64(&config, "world.seed", DEFAULT_WORLD_SEED);
-        let next_hive_id = snapshot
-            .placed_art
+        let next_hive_id = placed_art
             .iter()
             .filter_map(|placed| placed.hive_id)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let next_npc_id = snapshot
-            .npcs
+        let next_npc_id = npcs
             .iter()
             .map(|npc| npc.id)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
         let mut players = HashMap::new();
-        let next_player_id = snapshot
-            .players
+        let next_player_id = snapshot_players
             .iter()
             .map(|player| player.id)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        for player in snapshot.players {
+        for player in snapshot_players {
             players.insert(player.id, player);
         }
-        let pheromones = PheromoneGrid::empty(snapshot.world.width(), snapshot.world.height());
+        let pheromones = if pheromones.width() == world.width() && pheromones.height() == world.height()
+        {
+            pheromones
+        } else {
+            PheromoneGrid::empty(world.width(), world.height())
+        };
         Self {
-            tick: snapshot.tick,
-            world: snapshot.world,
+            tick,
+            world,
             pheromones,
             players,
-            npcs: snapshot.npcs,
-            placed_art: snapshot.placed_art,
-            event_log: snapshot.event_log,
+            npcs,
+            placed_art,
+            event_log,
             config,
-            simulation_paused: snapshot.simulation_paused,
+            simulation_paused,
             found_food_count: 0,
             delivered_food_count: 0,
             egg_laid_count: 0,
@@ -212,6 +238,7 @@ impl GameState {
         Snapshot {
             tick: self.tick,
             world: self.world.clone(),
+            pheromones: self.pheromones.clone(),
             players,
             npcs: self.npcs.clone(),
             placed_art: self.placed_art.clone(),
@@ -551,6 +578,25 @@ mod tests {
         assert_eq!(
             game.players.get(&player_id).and_then(|player| player.hive_id),
             Some(queen_hive_id)
+        );
+    }
+
+    #[test]
+    fn replay_snapshot_restores_pheromone_state() {
+        let mut game = GameState::new();
+        let hive_id = 7;
+        let pos = Position { x: 26, y: 54 };
+        game.pheromones
+            .deposit(pos, hive_id, PheromoneChannel::Food, 100);
+
+        let snapshot = game.snapshot();
+        let restored = GameState::from_replay_snapshot(snapshot);
+
+        assert_eq!(
+            restored
+                .pheromones
+                .value(pos, hive_id, PheromoneChannel::Food),
+            100
         );
     }
 

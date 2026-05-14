@@ -39,7 +39,7 @@ pub struct PheromoneCell {
     pub entries: Vec<HivePheromone>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PheromoneGrid {
     width: i32,
     height: i32,

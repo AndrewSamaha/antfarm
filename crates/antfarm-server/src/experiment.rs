@@ -550,7 +550,8 @@ fn write_replay_artifact(
             "randomized_seed": context.randomized_seed,
         }),
     )
-    .context("build replay artifact")?;
+    .context("build replay artifact")?
+    .with_pause_at_end(true);
     let path = replay_artifact_path(context);
     let Some(parent) = path.parent() else {
         anyhow::bail!("invalid replay artifact path: {}", path.display());

@@ -12,6 +12,8 @@ use crate::{
 pub struct Snapshot {
     pub tick: u64,
     pub world: World,
+    #[serde(default)]
+    pub pheromones: crate::pheromones::PheromoneGrid,
     pub players: Vec<Player>,
     pub npcs: Vec<NpcAnt>,
     #[serde(default)]

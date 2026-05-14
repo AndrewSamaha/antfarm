@@ -10,6 +10,8 @@ pub struct ReplayArtifact {
     pub start_tick: u64,
     pub simulation_length: u64,
     pub expected_final_tick: u64,
+    #[serde(default)]
+    pub pause_at_end: bool,
     pub initial_snapshot_hash: String,
     pub expected_final_snapshot_hash: String,
     pub initial_snapshot: Snapshot,
@@ -41,6 +43,7 @@ impl ReplayArtifact {
             start_tick,
             simulation_length,
             expected_final_tick: start_tick.saturating_add(simulation_length),
+            pause_at_end: false,
             initial_snapshot_hash,
             expected_final_snapshot_hash,
             initial_snapshot,
@@ -48,11 +51,19 @@ impl ReplayArtifact {
         })
     }
 
+    pub fn with_pause_at_end(mut self, pause_at_end: bool) -> Self {
+        self.pause_at_end = pause_at_end;
+        self
+    }
+
     pub fn replay(&self) -> Result<ReplayVerification, serde_json::Error> {
         let initial_snapshot_hash = self.initial_snapshot.deterministic_hash_hex()?;
         let mut game = GameState::from_replay_snapshot(self.initial_snapshot.clone());
         for _ in 0..self.simulation_length {
             game.tick();
+        }
+        if self.pause_at_end {
+            game.set_simulation_paused(true);
         }
         let final_snapshot = game.snapshot();
         let actual_final_snapshot_hash = final_snapshot.deterministic_hash_hex()?;
