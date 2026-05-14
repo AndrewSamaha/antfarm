@@ -477,6 +477,11 @@ impl GameState {
 
         let spawn_x = (8 + self.players.len() as i32 * 6).min(self.world.width() - 2);
         let was_restored = restored_player.is_some();
+        let existing_queen_hive_id = self
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .and_then(|npc| npc.hive_id);
         let mut player = restored_player.unwrap_or_else(|| Player {
             id: player_id,
             name: name.clone(),
@@ -485,7 +490,7 @@ impl GameState {
                 y: self.world.spawn_y_for_column(spawn_x),
             },
             facing: Facing::Right,
-            hive_id: None,
+            hive_id: existing_queen_hive_id,
             inventory: default_inventory(),
         });
         player.id = player_id;

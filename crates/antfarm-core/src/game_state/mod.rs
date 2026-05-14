@@ -527,6 +527,34 @@ mod tests {
     }
 
     #[test]
+    fn new_players_join_the_first_existing_queen_hive() {
+        let mut game = GameState::new();
+        let queen_x = game.world.width() / 2;
+        let queen_pos = Position {
+            x: queen_x,
+            y: game.world.spawn_y_for_column(queen_x) + 20,
+        };
+        game.put_queen_at(queen_pos, None)
+            .expect("server queen placement should succeed");
+
+        let queen_hive_id = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .and_then(|npc| npc.hive_id)
+            .expect("placed queen should have a hive");
+
+        let (player_id, _) = game
+            .add_player("tester".to_string(), None)
+            .expect("player should join");
+
+        assert_eq!(
+            game.players.get(&player_id).and_then(|player| player.hive_id),
+            Some(queen_hive_id)
+        );
+    }
+
+    #[test]
     fn hatched_workers_fill_weighted_roles_and_non_foragers_stay_idle() {
         let mut config = json!({
             "world": { "seed": 7 },
