@@ -7,7 +7,7 @@ config:
     plant_growth_frequency: 0.001
     vertical_growth_multiple: 5.0
   colony:
-    ambient_worker_count: 2
+    ambient_worker_count: 0
     roles:
       food_gatherer:
         lifespan: 600
@@ -82,7 +82,7 @@ startup:
   sc_commands:
     - /sc dig 60 60 30 20
     - /sc put queen 60 60
-    - /sc set queen.eggs 12
+    - /sc set queen.eggs 1
     - /sc put stone 78 60 2 2
     - /sc dig 28 54 5 1
     - /sc dig 30 55 1 1
@@ -126,16 +126,24 @@ startup:
     - /sc put pheromone food 57 57 66
     - /sc put pheromone food 58 57 65
     - /sc put pheromone food 59 57 64
+    - /sc game unpause
 
 experiment:
-  debug_log: false
-  terminate_server_on_completion: false
-  randomize_seed_from_datetime: false
-  tick_millis:
+  debug_log: true
+  replay:
+    save: true
+  terminate_server_on_completion: true
+  randomize_seed_from_datetime: true
+  tick_millis: 1
   analysis:
-    metrics: []
+    metrics:
+      - simulation_length
+  conditions:
+    - name: baseline
+      runs: 1
   stop_conditions:
-    max_tick:
+    max_tick: 100
     max_day:
-    all_workers_dead: false
+    all_workers_dead: true
     no_eggs: false
+
