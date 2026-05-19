@@ -1253,6 +1253,7 @@ impl GameState {
             }
             "local_field_v1" => SearchBehaviorProfile::LocalFieldV1,
             "local_field_v2" => SearchBehaviorProfile::LocalFieldV2,
+            "outward_bias_v2" => SearchBehaviorProfile::OutwardBiasV2,
             "outward_bias_v1" => SearchBehaviorProfile::OutwardBiasV1,
             _ => SearchBehaviorProfile::Baseline,
         }

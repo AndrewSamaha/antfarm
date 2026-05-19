@@ -41,7 +41,7 @@ config:
     queen_no_fill_radius: 8
     dirt_place_cooldown_ticks: 11
     max_workers_per_hive: 30
-    search_behavior_profile: outward_bias_v1
+    search_behavior_profile: outward_bias_v2
     minimum_delay_to_hatch: 5
   queen:
     egg_laying_cooldown_ticks: 5
@@ -90,48 +90,11 @@ startup:
     - /sc dig 35 56 10 1
     - /sc dig 41 57 6 2
     - /sc dig 46 57 10 3
-    - /sc put pheromone food 26 54 100
-    - /sc put pheromone food 27 54 99
-    - /sc put pheromone food 28 54 98
-    - /sc put pheromone food 29 54 97
-    - /sc put pheromone food 30 54 96
-    - /sc put pheromone food 30 55 95
-    - /sc put pheromone food 30 56 94
-    - /sc put pheromone food 31 56 93
-    - /sc put pheromone food 32 56 92
-    - /sc put pheromone food 33 56 91
-    - /sc put pheromone food 34 56 90
-    - /sc put pheromone food 35 56 89
-    - /sc put pheromone food 36 56 88
-    - /sc put pheromone food 37 56 87
-    - /sc put pheromone food 38 56 86
-    - /sc put pheromone food 38 57 85
-    - /sc put pheromone food 39 57 84
-    - /sc put pheromone food 40 57 83
-    - /sc put pheromone food 41 57 82
-    - /sc put pheromone food 42 57 81
-    - /sc put pheromone food 43 57 80
-    - /sc put pheromone food 44 57 79
-    - /sc put pheromone food 45 57 78
-    - /sc put pheromone food 46 57 77
-    - /sc put pheromone food 47 57 76
-    - /sc put pheromone food 48 57 75
-    - /sc put pheromone food 49 57 74
-    - /sc put pheromone food 50 57 73
-    - /sc put pheromone food 51 57 72
-    - /sc put pheromone food 52 57 71
-    - /sc put pheromone food 53 57 70
-    - /sc put pheromone food 54 57 69
-    - /sc put pheromone food 55 57 68
-    - /sc put pheromone food 56 57 67
-    - /sc put pheromone food 57 57 66
-    - /sc put pheromone food 58 57 65
-    - /sc put pheromone food 59 57 64
 
 experiment:
   debug_log: false
   terminate_server_on_completion: false
-  randomize_seed_from_datetime: false
+  randomize_seed_from_datetime: true
   tick_millis:
   analysis:
     metrics: []

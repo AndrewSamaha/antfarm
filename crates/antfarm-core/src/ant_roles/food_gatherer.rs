@@ -11,6 +11,7 @@ use crate::{
 pub(crate) enum SearchBehaviorProfile {
     Baseline,
     OutwardBiasV1,
+    OutwardBiasV2,
     LocalFieldV1,
     LocalFieldV2,
     OutwardBiasWithLocalFieldV1,
@@ -61,6 +62,29 @@ pub(crate) fn tick(
     );
     let search_profile = game.search_behavior_profile();
     let effective_search_profile = game.effective_search_behavior_profile(index, search_profile);
+    let visible_food_target = if behavior == AntBehaviorState::Searching
+        && effective_search_profile == SearchBehaviorProfile::OutwardBiasV2
+    {
+        find_visible_food_target(game, npc_pos, sensory_radius)
+    } else {
+        None
+    };
+    let visible_food_pheromone_target = if behavior == AntBehaviorState::Searching
+        && effective_search_profile == SearchBehaviorProfile::OutwardBiasV2
+        && visible_food_target.is_none()
+    {
+        npc_hive.and_then(|hive_id| {
+            find_visible_higher_food_pheromone_target(
+                game,
+                npc_pos,
+                hive_id,
+                sensory_radius,
+                current_food_pheromone,
+            )
+        })
+    } else {
+        None
+    };
     let food_carry_max = game.food_carry_max();
     let carry_visible_food_targets = if behavior == AntBehaviorState::Searching
         && game.npcs[index].carrying_food
@@ -170,7 +194,30 @@ pub(crate) fn tick(
                     0_u32
                 }
             }
+            (
+                AntBehaviorState::Searching,
+                SearchBehaviorProfile::OutwardBiasV2,
+                Some(queen_pos),
+            ) if visible_food_target.is_none() && visible_food_pheromone_target.is_none() => {
+                let current = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
+                let next_dist = (queen_pos.x - next.x).abs() + (queen_pos.y - next.y).abs();
+                if next_dist > current {
+                    80_u32
+                } else if next_dist == current {
+                    8_u32
+                } else {
+                    0_u32
+                }
+            }
             _ => 0_u32,
+        };
+        let visible_food_target_bias = match visible_food_target {
+            Some(target) => target_approach_bias(npc_pos, next, target, 320, 180, 16),
+            None => 0_u32,
+        };
+        let food_pheromone_target_bias = match visible_food_pheromone_target {
+            Some(target) => target_approach_bias(npc_pos, next, target, 260, 140, 12),
+            None => 0_u32,
         };
         let local_field_search = match (behavior, effective_search_profile, npc_hive) {
             (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV1, Some(hive_id))
@@ -217,6 +264,8 @@ pub(crate) fn tick(
             queen_bias,
             sensory_bias,
             search_profile_bias,
+            visible_food_target_bias,
+            food_pheromone_target_bias,
             local_field_search,
             destination_bias,
             carry_harvest_bias,
@@ -227,7 +276,7 @@ pub(crate) fn tick(
     let has_increasing_adjacent_food_signal = matches!(behavior, AntBehaviorState::Searching)
         && raw_candidates
             .iter()
-            .any(|(_, _, food_pheromone, _, _, _, _, _, _, _, _, _, _)| {
+            .any(|(_, _, food_pheromone, _, _, _, _, _, _, _, _, _, _, _, _)| {
                 *food_pheromone > current_food_pheromone
             });
 
@@ -243,6 +292,8 @@ pub(crate) fn tick(
         queen_bias,
         sensory_bias,
         search_profile_bias,
+        visible_food_target_bias,
+        food_pheromone_target_bias,
         local_field_search,
         destination_bias,
         carry_harvest_bias,
@@ -283,6 +334,8 @@ pub(crate) fn tick(
             + queen_bias
             + sensory_bias
             + search_profile_bias
+            + visible_food_target_bias
+            + food_pheromone_target_bias
             + carry_harvest_bias;
         let score = score
             .saturating_sub(terrain_penalty + recent_position_penalty + local_field_penalty);
@@ -301,6 +354,8 @@ pub(crate) fn tick(
             "sensory_bias": sensory_bias,
             "search_profile": search_behavior_profile_name(effective_search_profile),
             "search_profile_bias": search_profile_bias,
+            "visible_food_target_bias": visible_food_target_bias,
+            "food_pheromone_target_bias": food_pheromone_target_bias,
             "search_destination": search_destination.map(|pos| json!({ "x": pos.x, "y": pos.y })),
             "destination_bias": destination_bias,
             "carry_harvest_bias": carry_harvest_bias,
@@ -484,6 +539,7 @@ pub(crate) fn search_behavior_profile_name(profile: SearchBehaviorProfile) -> &'
     match profile {
         SearchBehaviorProfile::Baseline => "baseline",
         SearchBehaviorProfile::OutwardBiasV1 => "outward_bias_v1",
+        SearchBehaviorProfile::OutwardBiasV2 => "outward_bias_v2",
         SearchBehaviorProfile::LocalFieldV1 => "local_field_v1",
         SearchBehaviorProfile::LocalFieldV2 => "local_field_v2",
         SearchBehaviorProfile::OutwardBiasWithLocalFieldV1 => "outward_bias_with_local_field_v1",
@@ -510,6 +566,94 @@ pub(crate) fn local_field_destination_bias(
     } else {
         0
     }
+}
+
+pub(crate) fn target_approach_bias(
+    current: Position,
+    next: Position,
+    target: Position,
+    on_target_bonus: u32,
+    closer_bonus: u32,
+    equal_bonus: u32,
+) -> u32 {
+    let current_distance = manhattan_distance(current, target);
+    let next_distance = manhattan_distance(next, target);
+    if next == target {
+        on_target_bonus
+    } else if next_distance < current_distance {
+        u32::try_from(current_distance - next_distance).unwrap_or(0) * closer_bonus
+    } else if next_distance == current_distance {
+        equal_bonus
+    } else {
+        0
+    }
+}
+
+pub(crate) fn find_visible_food_target(
+    game: &GameState,
+    origin: Position,
+    sensory_radius: i32,
+) -> Option<Position> {
+    let mut best_target = None;
+    let mut best_distance = i32::MAX;
+    for dy in -sensory_radius..=sensory_radius {
+        for dx in -sensory_radius..=sensory_radius {
+            let pos = origin.offset(dx, dy);
+            if !game.world.in_bounds(pos) || game.world.tile(pos) != Some(Tile::Food) {
+                continue;
+            }
+            let distance = manhattan_distance(origin, pos);
+            if distance < best_distance
+                || (distance == best_distance
+                    && best_target
+                        .map(|current: Position| (pos.y, pos.x) < (current.y, current.x))
+                        .unwrap_or(true))
+            {
+                best_distance = distance;
+                best_target = Some(pos);
+            }
+        }
+    }
+    best_target
+}
+
+pub(crate) fn find_visible_higher_food_pheromone_target(
+    game: &GameState,
+    origin: Position,
+    hive_id: u16,
+    sensory_radius: i32,
+    current_food_pheromone: u32,
+) -> Option<Position> {
+    let mut best_target = None;
+    let mut best_pheromone = current_food_pheromone;
+    let mut best_distance = i32::MAX;
+    for dy in -sensory_radius..=sensory_radius {
+        for dx in -sensory_radius..=sensory_radius {
+            let pos = origin.offset(dx, dy);
+            if !game.world.in_bounds(pos) {
+                continue;
+            }
+            let food_pheromone =
+                u32::from(game.pheromones.value(pos, hive_id, PheromoneChannel::Food));
+            if food_pheromone <= current_food_pheromone {
+                continue;
+            }
+            let distance = manhattan_distance(origin, pos);
+            if food_pheromone > best_pheromone
+                || (food_pheromone == best_pheromone && distance < best_distance)
+                || (food_pheromone == best_pheromone
+                    && distance == best_distance
+                    && best_target
+                        .map(|current: Position| (pos.y, pos.x) < (current.y, current.x))
+                        .unwrap_or(true))
+            {
+                best_pheromone = food_pheromone;
+                best_distance = distance;
+                best_target = Some(pos);
+            }
+        }
+    }
+    best_target
 }
 
 pub(crate) fn recent_position_penalty(recent_positions: &[Position], next: Position) -> u32 {
