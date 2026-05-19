@@ -34,7 +34,8 @@ fn default_config() -> Value {
             "roles": {
                 "food_gatherer": {
                     "lifespan": 600,
-                    "weight": 3
+                    "weight": 3,
+                    "sensory_radius": 3
                 },
                 "hive_maintenance": {
                         "hub": {

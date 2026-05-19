@@ -10,8 +10,8 @@ use crate::{
     ant_roles::{
         WorkerRoleDefinition, configured_worker_roles,
         food_gatherer::{
-            LocalFieldSearchScore, SearchBehaviorProfile, axes_json, behavior_name, dir_name,
-            manhattan_distance, recent_position_penalty, tile_name,
+            LocalFieldSearchScore, SearchBehaviorProfile, behavior_name, manhattan_distance,
+            recent_position_penalty, tile_name,
         },
         initialize_worker_role, tick_worker,
     },
@@ -19,15 +19,15 @@ use crate::{
     constants::{
         DEFAULT_PLANT_GROWTH_FREQUENCY, DEFAULT_SOIL_SETTLE_FREQUENCY,
         DEFAULT_SOIL_VERTICAL_GROWTH_MULTIPLE, EGG_HATCH_TICKS, NPC_WORKER_LIFESPAN_TICKS,
-        PHEROMONE_DECAY_AMOUNT, PHEROMONE_DECAY_INTERVAL_TICKS, PHEROMONE_MEMORY_RADIUS,
-        PHEROMONE_MEMORY_TICKS, QUEEN_EGG_FOOD_COST, QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS,
+        PHEROMONE_DECAY_AMOUNT, PHEROMONE_DECAY_INTERVAL_TICKS, QUEEN_EGG_FOOD_COST,
+        QUEEN_HOME_EMIT_PEAK, QUEEN_HOME_EMIT_RADIUS,
     },
     inventory::{default_npc_inventory, inventory_count, remove_inventory},
     npc::nearest_open_tile,
     pheromones::{AntBehaviorState, PheromoneChannel},
     types::{
-        DEFAULT_WORKER_ROLE_PATH, MoveDir, NpcAnt, NpcKind, NpcRoleState, Position,
-        QueenChamberGrowthMode, Tile,
+        DEFAULT_WORKER_ROLE_PATH, NpcAnt, NpcKind, NpcRoleState, Position, QueenChamberGrowthMode,
+        Tile,
     },
 };
 
@@ -610,71 +610,20 @@ impl GameState {
             .map(|npc| npc.pos)
     }
 
-    pub(crate) fn tick_worker_memory(&mut self, index: usize) {
-        let Some(hive_id) = self.npcs[index].hive_id else {
-            return;
-        };
-        let pos = self.npcs[index].pos;
-
-        if self.npcs[index].recent_home_memory_ticks > 0 {
-            self.npcs[index].recent_home_memory_ticks -= 1;
-        }
-        if self.npcs[index].recent_food_memory_ticks > 0 {
-            self.npcs[index].recent_food_memory_ticks -= 1;
-        }
-
-        let should_refresh_home = self.npcs[index].recent_home_memory_ticks == 0;
-        let should_refresh_food = self.npcs[index].recent_food_memory_ticks == 0;
-
-        if should_refresh_home {
-            let axes = self.sample_gradient_axes(pos, hive_id, PheromoneChannel::Home);
-            self.npcs[index].recent_home_dir = best_direction_for_axes(axes);
-            self.npcs[index].recent_home_memory_ticks = PHEROMONE_MEMORY_TICKS;
-            self.push_npc_debug_event(crate::NpcDebugEvent {
-                tick: self.tick,
-                npc_id: self.npcs[index].id,
-                hive_id: Some(hive_id),
-                event_type: "memory_refresh_home".to_string(),
-                pos,
-                details: json!({
-                    "dir": self.npcs[index].recent_home_dir.map(dir_name),
-                    "ttl": self.npcs[index].recent_home_memory_ticks,
-                    "axes": axes_json(axes),
-                }),
-            });
-        }
-        if should_refresh_food {
-            let axes = self.sample_gradient_axes(pos, hive_id, PheromoneChannel::Food);
-            self.npcs[index].recent_food_dir = best_direction_for_axes(axes);
-            self.npcs[index].recent_food_memory_ticks = PHEROMONE_MEMORY_TICKS;
-            self.push_npc_debug_event(crate::NpcDebugEvent {
-                tick: self.tick,
-                npc_id: self.npcs[index].id,
-                hive_id: Some(hive_id),
-                event_type: "memory_refresh_food".to_string(),
-                pos,
-                details: json!({
-                    "dir": self.npcs[index].recent_food_dir.map(dir_name),
-                    "ttl": self.npcs[index].recent_food_memory_ticks,
-                    "axes": axes_json(axes),
-                }),
-            });
-        }
-    }
-
-    pub(crate) fn sample_gradient_axes(
+    pub(crate) fn sample_gradient_axes_with_radius(
         &self,
         origin: Position,
         hive_id: u16,
         channel: PheromoneChannel,
+        radius: i32,
     ) -> (u32, u32, u32, u32) {
         let mut up = 0u32;
         let mut down = 0u32;
         let mut left = 0u32;
         let mut right = 0u32;
 
-        for dy in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
-            for dx in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
                 if dx == 0 && dy == 0 {
                     continue;
                 }
@@ -702,14 +651,19 @@ impl GameState {
         (left, right, up, down)
     }
 
-    pub(crate) fn local_field_search_bias(&self, origin: Position, hive_id: u16) -> LocalFieldSearchScore {
+    pub(crate) fn local_field_search_bias(
+        &self,
+        origin: Position,
+        hive_id: u16,
+        radius: i32,
+    ) -> LocalFieldSearchScore {
         let mut best_food_distance = None;
         let mut food_field_score = 0u32;
         let mut home_field_penalty = 0u32;
         let mut stone_penalty = 0u32;
 
-        for dy in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
-            for dx in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
                 let pos = origin.offset(dx, dy);
                 if !self.world.in_bounds(pos) {
                     continue;
@@ -761,18 +715,19 @@ impl GameState {
         index: usize,
         hive_id: u16,
         queen_pos: Option<Position>,
+        radius: i32,
     ) -> Option<Position> {
         let origin = self.npcs[index].pos;
         let current = self.npcs[index].search_destination;
         let invalid = current.is_none_or(|destination| {
             destination == origin
                 || !self.local_destination_is_valid(index, destination)
-                || manhattan_distance(origin, destination) > PHEROMONE_MEMORY_RADIUS
+                || manhattan_distance(origin, destination) > radius
         });
         let stuck = self.npcs[index].search_destination_stuck_ticks >= 6;
         if invalid || stuck {
             self.npcs[index].search_destination =
-                self.choose_local_field_destination(index, hive_id, queen_pos);
+                self.choose_local_field_destination(index, hive_id, queen_pos, radius);
             self.npcs[index].search_destination_stuck_ticks = 0;
             if let Some(destination) = self.npcs[index].search_destination {
                 self.push_npc_debug_event(crate::NpcDebugEvent {
@@ -796,9 +751,10 @@ impl GameState {
         index: usize,
         hive_id: u16,
         queen_pos: Option<Position>,
+        radius: i32,
     ) -> Option<Position> {
         let origin = self.npcs[index].pos;
-        let reachable = self.local_reachable_search_tiles(index, origin);
+        let reachable = self.local_reachable_search_tiles(index, origin, radius);
         let mut best = None;
         let mut best_score = 0u32;
 
@@ -809,7 +765,7 @@ impl GameState {
             let Some(tile) = self.world.tile(candidate) else {
                 continue;
             };
-            let local = self.local_field_search_bias(candidate, hive_id);
+            let local = self.local_field_search_bias(candidate, hive_id, radius);
             let home_here = u32::from(self.pheromones.value(
                 candidate,
                 hive_id,
@@ -868,6 +824,7 @@ impl GameState {
         &self,
         index: usize,
         origin: Position,
+        radius: i32,
     ) -> Vec<(Position, usize)> {
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
@@ -885,7 +842,7 @@ impl GameState {
             ] {
                 if visited.contains(&next)
                     || !self.world.in_bounds(next)
-                    || manhattan_distance(origin, next) > PHEROMONE_MEMORY_RADIUS
+                    || manhattan_distance(origin, next) > radius
                     || !self.search_tile_traversable(index, next)
                 {
                     continue;
@@ -981,10 +938,15 @@ impl GameState {
             && !self.art_occupies_cell(pos)
     }
 
-    pub(crate) fn local_neighborhood_snapshot(&self, origin: Position, hive_id: u16) -> Value {
+    pub(crate) fn local_neighborhood_snapshot(
+        &self,
+        origin: Position,
+        hive_id: u16,
+        radius: i32,
+    ) -> Value {
         let mut cells = Vec::new();
-        for dy in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
-            for dx in -PHEROMONE_MEMORY_RADIUS..=PHEROMONE_MEMORY_RADIUS {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
                 let pos = origin.offset(dx, dy);
                 if !self.world.in_bounds(pos) {
                     continue;
@@ -1312,6 +1274,10 @@ impl GameState {
             _ => configured_profile,
         }
     }
+
+    pub(crate) fn food_gatherer_sensory_radius(&self) -> i32 {
+        config_i32(&self.config, "colony.roles.food_gatherer.sensory_radius", 3).max(1)
+    }
 }
 
 fn same_hive(left: Option<u16>, right: Option<u16>) -> bool {
@@ -1328,15 +1294,4 @@ fn remember_recent_position(recent_positions: &mut Vec<Position>, pos: Position)
         let extra = recent_positions.len() - RECENT_POSITION_MEMORY_SIZE;
         recent_positions.drain(0..extra);
     }
-}
-
-fn best_direction_for_axes((left, right, up, down): (u32, u32, u32, u32)) -> Option<MoveDir> {
-    let candidates = [
-        (left, MoveDir::Left),
-        (right, MoveDir::Right),
-        (up, MoveDir::Up),
-        (down, MoveDir::Down),
-    ];
-    let best = candidates.into_iter().max_by_key(|(score, _)| *score)?;
-    (best.0 > 0).then_some(best.1)
 }

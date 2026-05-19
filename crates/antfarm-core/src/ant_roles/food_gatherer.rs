@@ -31,15 +31,29 @@ pub(crate) fn tick(
     queen_pos: Option<Position>,
     events: &mut Vec<String>,
 ) {
-    game.tick_worker_memory(index);
     let npc_hive = game.npcs[index].hive_id;
     let npc_pos = game.npcs[index].pos;
     let npc_id = game.npcs[index].id;
     let behavior = game.npcs[index].behavior;
-    let home_axes =
-        npc_hive.map(|hive_id| game.sample_gradient_axes(npc_pos, hive_id, PheromoneChannel::Home));
-    let food_axes =
-        npc_hive.map(|hive_id| game.sample_gradient_axes(npc_pos, hive_id, PheromoneChannel::Food));
+    let sensory_radius = game.food_gatherer_sensory_radius();
+    let home_axes = npc_hive.map(|hive_id| {
+        game.sample_gradient_axes_with_radius(
+            npc_pos,
+            hive_id,
+            PheromoneChannel::Home,
+            sensory_radius,
+        )
+    });
+    let food_axes = npc_hive.map(|hive_id| {
+        game.sample_gradient_axes_with_radius(
+            npc_pos,
+            hive_id,
+            PheromoneChannel::Food,
+            sensory_radius,
+        )
+    });
+    let sensed_home_dir = home_axes.and_then(best_direction_for_axes);
+    let sensed_food_dir = food_axes.and_then(best_direction_for_axes);
     let current_food_pheromone = u32::from(
         npc_hive
             .map(|hive_id| game.pheromones.value(npc_pos, hive_id, PheromoneChannel::Food))
@@ -58,7 +72,7 @@ pub(crate) fn tick(
     };
     let search_destination = match (behavior, effective_search_profile, npc_hive) {
         (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(hive_id)) => {
-            game.refresh_local_field_destination(index, hive_id, queen_pos)
+            game.refresh_local_field_destination(index, hive_id, queen_pos, sensory_radius)
         }
         _ => {
             game.npcs[index].search_destination = None;
@@ -135,13 +149,9 @@ pub(crate) fn tick(
             }
             _ => 0_u32,
         };
-        let memory_bias = u32::from(match behavior {
-            AntBehaviorState::Searching => {
-                direction_bias(game.npcs[index].recent_food_dir, npc_pos, next)
-            }
-            AntBehaviorState::ReturningFood => {
-                direction_bias(game.npcs[index].recent_home_dir, npc_pos, next)
-            }
+        let sensory_bias = u32::from(match behavior {
+            AntBehaviorState::Searching => direction_bias(sensed_food_dir, npc_pos, next),
+            AntBehaviorState::ReturningFood => direction_bias(sensed_home_dir, npc_pos, next),
             AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
         });
         let search_profile_bias = match (behavior, effective_search_profile, queen_pos) {
@@ -165,7 +175,7 @@ pub(crate) fn tick(
         let local_field_search = match (behavior, effective_search_profile, npc_hive) {
             (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV1, Some(hive_id))
             | (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(hive_id)) => {
-                Some(game.local_field_search_bias(next, hive_id))
+                Some(game.local_field_search_bias(next, hive_id, sensory_radius))
             }
             _ => None,
         };
@@ -205,7 +215,7 @@ pub(crate) fn tick(
             random_score,
             tile_bonus,
             queen_bias,
-            memory_bias,
+            sensory_bias,
             search_profile_bias,
             local_field_search,
             destination_bias,
@@ -231,7 +241,7 @@ pub(crate) fn tick(
         random_score,
         tile_bonus,
         queen_bias,
-        memory_bias,
+        sensory_bias,
         search_profile_bias,
         local_field_search,
         destination_bias,
@@ -271,7 +281,7 @@ pub(crate) fn tick(
             + random_score
             + tile_bonus
             + queen_bias
-            + memory_bias
+            + sensory_bias
             + search_profile_bias
             + carry_harvest_bias;
         let score = score
@@ -288,7 +298,7 @@ pub(crate) fn tick(
             "random_score": random_score,
             "tile_bonus": tile_bonus,
             "queen_bias": queen_bias,
-            "memory_bias": memory_bias,
+            "sensory_bias": sensory_bias,
             "search_profile": search_behavior_profile_name(effective_search_profile),
             "search_profile_bias": search_profile_bias,
             "search_destination": search_destination.map(|pos| json!({ "x": pos.x, "y": pos.y })),
@@ -365,7 +375,6 @@ pub(crate) fn tick(
                 };
                 game.npcs[index].carrying_food_ticks = 0;
                 game.npcs[index].home_trail_steps = None;
-                game.npcs[index].recent_home_memory_ticks = 0;
                 game.npcs[index].recent_positions.clear();
                 game.npcs[index].search_destination = None;
                 game.npcs[index].search_destination_stuck_ticks = 0;
@@ -441,11 +450,10 @@ pub(crate) fn tick(
                 .map(|pos| json!({ "x": pos.x, "y": pos.y })),
             "search_destination_stuck_ticks": game.npcs[index].search_destination_stuck_ticks,
             "has_delivered_food": game.npcs[index].has_delivered_food,
-            "memory": {
-                "home_dir": game.npcs[index].recent_home_dir.map(dir_name),
-                "home_ttl": game.npcs[index].recent_home_memory_ticks,
-                "food_dir": game.npcs[index].recent_food_dir.map(dir_name),
-                "food_ttl": game.npcs[index].recent_food_memory_ticks,
+            "senses": {
+                "radius": sensory_radius,
+                "home_dir": sensed_home_dir.map(dir_name),
+                "food_dir": sensed_food_dir.map(dir_name),
                 "recent_positions": game.npcs[index]
                     .recent_positions
                     .iter()
@@ -457,7 +465,9 @@ pub(crate) fn tick(
                 "food": food_axes.map(axes_json),
             },
             "queen_pos": queen_pos.map(|pos| json!({ "x": pos.x, "y": pos.y })),
-            "neighborhood": npc_hive.map(|hive_id| game.local_neighborhood_snapshot(npc_pos, hive_id)),
+            "neighborhood": npc_hive.map(|hive_id| {
+                game.local_neighborhood_snapshot(npc_pos, hive_id, sensory_radius)
+            }),
             "candidates": candidate_logs,
             "chosen_next": chosen_next.map(|pos| json!({ "x": pos.x, "y": pos.y })),
             "outcome": outcome,
@@ -534,6 +544,17 @@ pub(crate) fn direction_bias(preferred: Option<MoveDir>, current: Position, next
         _ => return 0,
     };
     if dir == preferred { 32 } else { 0 }
+}
+
+fn best_direction_for_axes((left, right, up, down): (u32, u32, u32, u32)) -> Option<MoveDir> {
+    let candidates = [
+        (left, MoveDir::Left),
+        (right, MoveDir::Right),
+        (up, MoveDir::Up),
+        (down, MoveDir::Down),
+    ];
+    let best = candidates.into_iter().max_by_key(|(score, _)| *score)?;
+    (best.0 > 0).then_some(best.1)
 }
 
 pub(crate) fn food_deposit_for_carry_ticks(carry_ticks: u16) -> u8 {

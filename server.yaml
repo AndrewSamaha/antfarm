@@ -12,6 +12,7 @@ config:
       food_gatherer:
         lifespan: 600
         weight: 4
+        sensory_radius: 3
       hive_maintenance:
         hub:
           lifespan: 2000
