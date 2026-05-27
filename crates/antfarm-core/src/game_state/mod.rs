@@ -1503,6 +1503,249 @@ mod tests {
     }
 
     #[test]
+    fn outward_bias_v1_prefers_outward_motion_over_a_slightly_stronger_visible_food_trail() {
+        let mut config = json!({
+            "world": { "seed": 47 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "search_behavior_profile": "outward_bias_v1"
+            }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open search area");
+
+        let start = Position {
+            x: queen.pos.x + 10,
+            y: queen.pos.y,
+        };
+        let outward = start.offset(1, 0);
+        let trail = start.offset(-1, 0);
+        game.set_world_tile(outward, Tile::Empty);
+        game.set_world_tile(trail, Tile::Empty);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.pheromones
+            .deposit(start, queen.hive_id.expect("queen hive"), PheromoneChannel::Food, 79);
+        game.pheromones
+            .deposit(trail, queen.hive_id.expect("queen hive"), PheromoneChannel::Food, 80);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 0,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, outward);
+    }
+
+    #[test]
+    fn outward_bias_v2_prefers_a_visible_higher_food_pheromone_target_over_outward_motion() {
+        let mut config = json!({
+            "world": { "seed": 49 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "search_behavior_profile": "outward_bias_v2"
+            }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open search area");
+
+        let start = Position {
+            x: queen.pos.x + 10,
+            y: queen.pos.y,
+        };
+        let outward = start.offset(1, 0);
+        let trail = start.offset(-1, 0);
+        game.set_world_tile(outward, Tile::Empty);
+        game.set_world_tile(trail, Tile::Empty);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.pheromones
+            .deposit(start, queen.hive_id.expect("queen hive"), PheromoneChannel::Food, 79);
+        game.pheromones
+            .deposit(trail, queen.hive_id.expect("queen hive"), PheromoneChannel::Food, 80);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 0,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, trail);
+    }
+
+    #[test]
+    fn outward_bias_v2_prefers_visible_food_over_outward_motion_and_pheromone_targets() {
+        let mut config = json!({
+            "world": { "seed": 51 },
+            "colony": {
+                "ambient_worker_count": 0,
+                "search_behavior_profile": "outward_bias_v2"
+            }
+        });
+        set_config_path(&mut config, "soil.settle_frequency", json!(0.0))
+            .expect("disable settling");
+        set_config_path(&mut config, "soil.plant_growth_frequency", json!(0.0))
+            .expect("disable plant growth");
+        let mut game = GameState::from_config(config);
+        seed_test_colony(&mut game);
+        let queen = game
+            .npcs
+            .iter()
+            .find(|npc| npc.kind == NpcKind::Queen)
+            .cloned()
+            .expect("queen should exist");
+        game.dig_area_at(queen.pos, 90, 90, None)
+            .expect("open search area");
+
+        let start = Position {
+            x: queen.pos.x + 10,
+            y: queen.pos.y,
+        };
+        let outward = start.offset(1, 0);
+        let food_target = start.offset(-1, 0);
+        game.set_world_tile(outward, Tile::Empty);
+        game.set_world_tile(food_target, Tile::Food);
+        game.set_world_tile(start.offset(0, -1), Tile::Stone);
+        game.set_world_tile(start.offset(0, 1), Tile::Stone);
+        game.pheromones
+            .deposit(outward, queen.hive_id.expect("queen hive"), PheromoneChannel::Food, 120);
+
+        let worker_id = game.next_npc_id;
+        game.next_npc_id = game.next_npc_id.saturating_add(1);
+        game.npcs.push(NpcAnt {
+            id: worker_id,
+            pos: start,
+            inventory: default_npc_inventory(),
+            kind: NpcKind::Worker,
+            health: NpcKind::Worker.max_health(),
+            food: 0,
+            hive_id: queen.hive_id,
+            age_ticks: 0,
+            behavior: AntBehaviorState::Searching,
+            carrying_food: false,
+            carrying_food_ticks: 0,
+            home_trail_steps: None,
+            recent_home_dir: None,
+            recent_food_dir: None,
+            recent_home_memory_ticks: 0,
+            recent_food_memory_ticks: 0,
+            recent_positions: Vec::new(),
+            search_destination: None,
+            search_destination_stuck_ticks: 0,
+            search_opened_tile: None,
+            search_refill_tile: None,
+            has_delivered_food: false,
+            last_dirt_place_tick: None,
+            last_egg_laid_tick: None,
+            last_egg_hatched_tick: None,
+            role: Some("food_gatherer".to_string()),
+            role_state: NpcRoleState::None,
+        });
+
+        game.tick();
+
+        let worker = game
+            .npcs
+            .iter()
+            .find(|npc| npc.id == worker_id)
+            .expect("worker should still exist");
+        assert_eq!(worker.pos, food_target);
+        assert!(worker.carrying_food);
+        assert_eq!(worker.behavior, AntBehaviorState::ReturningFood);
+    }
+
+    #[test]
     fn searching_food_gatherers_refill_self_opened_tunnel_tiles_after_moving_off_them() {
         let mut config = json!({
             "world": { "seed": 41 },

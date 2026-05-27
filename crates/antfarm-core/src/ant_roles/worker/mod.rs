@@ -1,3 +1,5 @@
+mod search_behavior_profiles;
+
 use serde_json::{Value, json};
 
 use crate::{
@@ -7,15 +9,10 @@ use crate::{
     types::{MoveDir, Position, Tile},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SearchBehaviorProfile {
-    Baseline,
-    OutwardBiasV1,
-    OutwardBiasV2,
-    LocalFieldV1,
-    LocalFieldV2,
-    OutwardBiasWithLocalFieldV1,
-}
+pub(crate) use search_behavior_profiles::{SearchBehaviorProfile, search_behavior_profile_name};
+use search_behavior_profiles::{
+    SearchCandidateContext, SearchTickContext, pheromone_score, prepare, score_candidate,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LocalFieldSearchScore {
@@ -62,29 +59,6 @@ pub(crate) fn tick(
     );
     let search_profile = game.search_behavior_profile();
     let effective_search_profile = game.effective_search_behavior_profile(index, search_profile);
-    let visible_food_target = if behavior == AntBehaviorState::Searching
-        && effective_search_profile == SearchBehaviorProfile::OutwardBiasV2
-    {
-        find_visible_food_target(game, npc_pos, sensory_radius)
-    } else {
-        None
-    };
-    let visible_food_pheromone_target = if behavior == AntBehaviorState::Searching
-        && effective_search_profile == SearchBehaviorProfile::OutwardBiasV2
-        && visible_food_target.is_none()
-    {
-        npc_hive.and_then(|hive_id| {
-            find_visible_higher_food_pheromone_target(
-                game,
-                npc_pos,
-                hive_id,
-                sensory_radius,
-                current_food_pheromone,
-            )
-        })
-    } else {
-        None
-    };
     let food_carry_max = game.food_carry_max();
     let carry_visible_food_targets = if behavior == AntBehaviorState::Searching
         && game.npcs[index].carrying_food
@@ -104,6 +78,16 @@ pub(crate) fn tick(
             None
         }
     };
+    let search_tick_context = SearchTickContext {
+        behavior,
+        npc_hive,
+        npc_pos,
+        queen_pos,
+        sensory_radius,
+        current_food_pheromone,
+        search_destination,
+    };
+    let prepared_search_profile = prepare(game, effective_search_profile, &search_tick_context);
 
     if let Some(hive_id) = npc_hive {
         match behavior {
@@ -178,60 +162,18 @@ pub(crate) fn tick(
             AntBehaviorState::ReturningFood => direction_bias(sensed_home_dir, npc_pos, next),
             AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
         });
-        let search_profile_bias = match (behavior, effective_search_profile, queen_pos) {
-            (
-                AntBehaviorState::Searching,
-                SearchBehaviorProfile::OutwardBiasV1,
-                Some(queen_pos),
-            ) => {
-                let current = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
-                let next_dist = (queen_pos.x - next.x).abs() + (queen_pos.y - next.y).abs();
-                if next_dist > current {
-                    80_u32
-                } else if next_dist == current {
-                    8_u32
-                } else {
-                    0_u32
-                }
-            }
-            (
-                AntBehaviorState::Searching,
-                SearchBehaviorProfile::OutwardBiasV2,
-                Some(queen_pos),
-            ) if visible_food_target.is_none() && visible_food_pheromone_target.is_none() => {
-                let current = (queen_pos.x - npc_pos.x).abs() + (queen_pos.y - npc_pos.y).abs();
-                let next_dist = (queen_pos.x - next.x).abs() + (queen_pos.y - next.y).abs();
-                if next_dist > current {
-                    80_u32
-                } else if next_dist == current {
-                    8_u32
-                } else {
-                    0_u32
-                }
-            }
-            _ => 0_u32,
+        let candidate_context = SearchCandidateContext {
+            next,
+            food_pheromone,
+            home_pheromone,
         };
-        let visible_food_target_bias = match visible_food_target {
-            Some(target) => target_approach_bias(npc_pos, next, target, 320, 180, 16),
-            None => 0_u32,
-        };
-        let food_pheromone_target_bias = match visible_food_pheromone_target {
-            Some(target) => target_approach_bias(npc_pos, next, target, 260, 140, 12),
-            None => 0_u32,
-        };
-        let local_field_search = match (behavior, effective_search_profile, npc_hive) {
-            (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV1, Some(hive_id))
-            | (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(hive_id)) => {
-                Some(game.local_field_search_bias(next, hive_id, sensory_radius))
-            }
-            _ => None,
-        };
-        let destination_bias = match (behavior, effective_search_profile, search_destination) {
-            (AntBehaviorState::Searching, SearchBehaviorProfile::LocalFieldV2, Some(destination)) => {
-                local_field_destination_bias(npc_pos, next, destination)
-            }
-            _ => 0_u32,
-        };
+        let search_scoring = score_candidate(
+            game,
+            effective_search_profile,
+            &search_tick_context,
+            &prepared_search_profile,
+            candidate_context,
+        );
         let carry_harvest_bias = if !carry_visible_food_targets.is_empty() {
             let current_best = carry_visible_food_targets
                 .iter()
@@ -253,7 +195,8 @@ pub(crate) fn tick(
         } else {
             0_u32
         };
-        let recent_position_penalty = recent_position_penalty(&game.npcs[index].recent_positions, next);
+        let recent_position_penalty =
+            recent_position_penalty(&game.npcs[index].recent_positions, next);
         raw_candidates.push((
             next,
             tile,
@@ -263,11 +206,11 @@ pub(crate) fn tick(
             tile_bonus,
             queen_bias,
             sensory_bias,
-            search_profile_bias,
-            visible_food_target_bias,
-            food_pheromone_target_bias,
-            local_field_search,
-            destination_bias,
+            search_scoring.search_profile_bias,
+            search_scoring.visible_food_target_bias,
+            search_scoring.food_pheromone_target_bias,
+            search_scoring.local_field_search,
+            search_scoring.destination_bias,
             carry_harvest_bias,
             recent_position_penalty,
         ));
@@ -300,26 +243,26 @@ pub(crate) fn tick(
         recent_position_penalty,
     ) in raw_candidates
     {
-        let pheromone_score = match behavior {
-            AntBehaviorState::Searching
-                if effective_search_profile == SearchBehaviorProfile::LocalFieldV1 =>
-            {
-                local_field_search
-                    .map(|score| score.visible_food_bonus + score.food_field_score)
-                    .unwrap_or(0)
-            }
-            AntBehaviorState::Searching
-                if effective_search_profile == SearchBehaviorProfile::LocalFieldV2 =>
-            {
-                destination_bias
-            }
-            AntBehaviorState::Searching if has_increasing_adjacent_food_signal => {
-                food_pheromone.saturating_sub(current_food_pheromone)
-            }
-            AntBehaviorState::Searching => 255_u32.saturating_sub(home_pheromone),
-            AntBehaviorState::ReturningFood => home_pheromone,
-            AntBehaviorState::Defending | AntBehaviorState::Idle => 0,
+        let candidate_context = SearchCandidateContext {
+            next,
+            food_pheromone,
+            home_pheromone,
         };
+        let search_scoring = search_behavior_profiles::SearchCandidateScoring {
+            search_profile_bias,
+            visible_food_target_bias,
+            food_pheromone_target_bias,
+            local_field_search,
+            destination_bias,
+        };
+        let pheromone_score = pheromone_score(
+            effective_search_profile,
+            behavior,
+            current_food_pheromone,
+            has_increasing_adjacent_food_signal,
+            candidate_context,
+            &search_scoring,
+        );
         let terrain_penalty = match (behavior, tile) {
             (AntBehaviorState::ReturningFood, Some(Tile::Stone)) => 220_u32,
             (AntBehaviorState::ReturningFood, Some(Tile::Bedrock)) => 260_u32,
@@ -414,9 +357,12 @@ pub(crate) fn tick(
                 if matches!(behavior, AntBehaviorState::Searching) {
                     game.finish_search_move(index, npc_pos, next);
                 }
-                let lifespan_bonus =
-                    worker_lifespan_bonus(game.npcs[index].age_ticks, game.worker_lifespan_ticks_for(index));
-                game.npcs[index].age_ticks = game.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
+                let lifespan_bonus = worker_lifespan_bonus(
+                    game.npcs[index].age_ticks,
+                    game.worker_lifespan_ticks_for(index),
+                );
+                game.npcs[index].age_ticks =
+                    game.npcs[index].age_ticks.saturating_sub(lifespan_bonus);
                 let previous_carried = game.npcs[index].food;
                 let carried_after_pickup = previous_carried.saturating_add(1).min(food_carry_max);
                 game.npcs[index].carrying_food = true;
@@ -523,6 +469,10 @@ pub(crate) fn tick(
             "neighborhood": npc_hive.map(|hive_id| {
                 game.local_neighborhood_snapshot(npc_pos, hive_id, sensory_radius)
             }),
+            "prepared_search_profile": {
+                "visible_food_target": prepared_search_profile.visible_food_target.map(|pos| json!({ "x": pos.x, "y": pos.y })),
+                "visible_food_pheromone_target": prepared_search_profile.visible_food_pheromone_target.map(|pos| json!({ "x": pos.x, "y": pos.y })),
+            },
             "candidates": candidate_logs,
             "chosen_next": chosen_next.map(|pos| json!({ "x": pos.x, "y": pos.y })),
             "outcome": outcome,
@@ -533,17 +483,6 @@ pub(crate) fn tick(
 pub(crate) fn on_hatch(game: &mut GameState, index: usize) {
     game.npcs[index].behavior = crate::AntBehaviorState::Searching;
     game.npcs[index].home_trail_steps = Some(0);
-}
-
-pub(crate) fn search_behavior_profile_name(profile: SearchBehaviorProfile) -> &'static str {
-    match profile {
-        SearchBehaviorProfile::Baseline => "baseline",
-        SearchBehaviorProfile::OutwardBiasV1 => "outward_bias_v1",
-        SearchBehaviorProfile::OutwardBiasV2 => "outward_bias_v2",
-        SearchBehaviorProfile::LocalFieldV1 => "local_field_v1",
-        SearchBehaviorProfile::LocalFieldV2 => "local_field_v2",
-        SearchBehaviorProfile::OutwardBiasWithLocalFieldV1 => "outward_bias_with_local_field_v1",
-    }
 }
 
 pub(crate) fn manhattan_distance(a: Position, b: Position) -> i32 {

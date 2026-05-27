@@ -1,6 +1,6 @@
-pub(crate) mod food_gatherer;
 pub(crate) mod hub;
 pub(crate) mod queen_chamber;
+pub(crate) mod worker;
 
 use serde_json::Value;
 
@@ -33,8 +33,8 @@ struct RoleHandler {
 const ROLE_HANDLERS: &[RoleHandler] = &[
     RoleHandler {
         path: FOOD_GATHERER_ROLE_PATH,
-        tick: food_gatherer::tick,
-        on_hatch: food_gatherer::on_hatch,
+        tick: worker::tick,
+        on_hatch: worker::on_hatch,
     },
     RoleHandler {
         path: HUB_ROLE_PATH,

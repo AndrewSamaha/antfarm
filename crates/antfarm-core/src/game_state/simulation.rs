@@ -9,7 +9,7 @@ const DEFAULT_QUEEN_CHAMBER_RADIUS_Y: i32 = 15;
 use crate::{
     ant_roles::{
         WorkerRoleDefinition, configured_worker_roles,
-        food_gatherer::{
+        worker::{
             LocalFieldSearchScore, SearchBehaviorProfile, behavior_name, manhattan_distance,
             recent_position_penalty, tile_name,
         },
